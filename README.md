@@ -1,3 +1,7 @@
+<p align="center">
+  <img width="1200" alt="AutoLoop Overview" src="https://github.com/user-attachments/assets/ae515bbd-63cf-4cab-9965-d296305682ca" />
+</p>
+
 # 🔄 AutoLoop
 > A Rust-native AIOS for **governed agent execution**
 
@@ -7,9 +11,7 @@
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Alpha-brightgreen)](#)
 
-<p align="center">
-  <img width="1200" alt="AutoLoop Overview" src="https://github.com/user-attachments/assets/ae515bbd-63cf-4cab-9965-d296305682ca" />
-</p>
+
 
 ---
 
