@@ -1,4 +1,4 @@
-version: "3.9"
+﻿version: "3.9"
 
 services:
   autoloop:
@@ -15,13 +15,13 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - spacetimedb
+      - state_store
       - browserless
       - prometheus
       - alertmanager
 
-  spacetimedb:
-    image: clockworklabs/spacetimedb:latest
+  state_store:
+    image: clockworklabs/state_store:latest
     command: start --listen-addr 0.0.0.0:3000
     ports:
       - "3001:3000"
@@ -53,3 +53,4 @@ services:
       - ./deploy/monitoring/alertmanager-config.yaml:/etc/alertmanager/alertmanager.yml:ro
     ports:
       - "9093:9093"
+

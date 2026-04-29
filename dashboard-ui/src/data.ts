@@ -1,4 +1,4 @@
-import type { DashboardSessionSnapshot } from "./types/snapshot";
+﻿import type { DashboardSessionSnapshot } from "./types/snapshot";
 import type { SessionReplay } from "./types/replay";
 
 export const demoReplay: SessionReplay = {
@@ -55,7 +55,7 @@ export const demoReplay: SessionReplay = {
 
 export const demoDashboardSnapshot: DashboardSessionSnapshot = {
   sessionId: "cli-focus",
-  anchor: "2024中国乘用车新能源补贴政策",
+  anchor: "2024涓浗涔樼敤杞︽柊鑳芥簮琛ヨ创鏀跨瓥",
   ceoSummary:
     "CEO routes requirement clarification into research, capability reuse, verifier-gated execution, and graph memory consolidation.",
   validationSummary:
@@ -115,7 +115,7 @@ export const demoDashboardSnapshot: DashboardSessionSnapshot = {
     relationships: 233,
     communities: 19,
     forgedCapabilityCount: 7,
-    topEntities: ["新能源补贴", "上海市发改委", "policy-extract", "browser-research", "SpacetimeDB"]
+    topEntities: ["鏂拌兘婧愯ˉ璐?, "涓婃捣甯傚彂鏀瑰", "policy-extract", "browser-research", "StateStore"]
   },
   verifier: {
     verdict: "pass",
@@ -199,3 +199,4 @@ export const demoDashboardSnapshot: DashboardSessionSnapshot = {
   },
   replay: demoReplay
 };
+

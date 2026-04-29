@@ -1,7 +1,14 @@
+﻿pub mod collector;
 pub mod event_stream;
+pub mod policy_signal;
+pub mod query_plane;
+pub mod signal_facade;
+mod signal_pipeline;
+
+pub use signal_facade::SignalFacade;
 
 use anyhow::Result;
-use autoloop_spacetimedb_adapter::SpacetimeDb;
+use autoloop_state_adapter::StateStore;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -9,6 +16,7 @@ use crate::{
     config::{DeploymentConfig, ObservabilityConfig},
     contracts::version::CONTRACT_VERSION,
     observability::event_stream::append_event,
+    orchestration::governance_telemetry_scope::GovernanceTelemetryScope,
     orchestration::{ExecutionReport, SwarmOutcome},
     runtime::FailoverRecord,
     tools::CapabilityLifecycleReport,
@@ -52,6 +60,36 @@ pub struct DashboardSnapshot {
     pub validation_ready: bool,
     pub verifier_score: f32,
     pub capability_failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HumanFacingObservability {
+    pub session_id: String,
+    pub dashboard: DashboardSnapshot,
+    pub operations_report: OperationsReport,
+    pub resilience_report: ResilienceReport,
+    pub report_channels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemTelemetrySnapshot {
+    pub session_id: String,
+    pub route_quality_score: f32,
+    pub verifier_failure_rate: f32,
+    pub capability_trust_decay: f32,
+    pub promotion_success_rate: f32,
+    pub open_circuit_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupermemoryMetricsRecord {
+    pub session_id: String,
+    pub ingestion_count: usize,
+    pub chunk_count: usize,
+    pub atomic_count: usize,
+    pub relation_count: usize,
+    pub retrieval_hits: usize,
+    pub generated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,10 +229,71 @@ impl ObservabilityKernel {
         Ok(())
     }
 
+    pub async fn persist_supermemory_metrics(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        retrieval_hits: usize,
+    ) -> Result<SupermemoryMetricsRecord> {
+        let ingestion_count = count_non_latest_records(
+            db.list_knowledge_by_prefix(&format!("memory:supermemory:queue:{session_id}:"))
+                .await?
+                .iter()
+                .map(|record| record.key.clone())
+                .collect::<Vec<_>>(),
+        );
+        let chunk_count = count_non_latest_records(
+            db.list_knowledge_by_prefix(&format!("memory:supermemory:chunks:{session_id}:"))
+                .await?
+                .iter()
+                .map(|record| record.key.clone())
+                .collect::<Vec<_>>(),
+        );
+        let atomic_count = count_non_latest_records(
+            db.list_knowledge_by_prefix(&format!("memory:supermemory:atomic:{session_id}:"))
+                .await?
+                .iter()
+                .map(|record| record.key.clone())
+                .collect::<Vec<_>>(),
+        );
+        let relation_count = count_non_latest_records(
+            db.list_knowledge_by_prefix(&format!("memory:supermemory:relations:{session_id}:"))
+                .await?
+                .iter()
+                .map(|record| record.key.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        let metrics = SupermemoryMetricsRecord {
+            session_id: session_id.to_string(),
+            ingestion_count,
+            chunk_count,
+            atomic_count,
+            relation_count,
+            retrieval_hits,
+            generated_at_ms: crate::orchestration::current_time_ms(),
+        };
+
+        db.upsert_json_knowledge(
+            format!("observability:{session_id}:supermemory-metrics"),
+            &metrics,
+            "observability",
+        )
+        .await?;
+        db.upsert_json_knowledge(
+            format!("metrics:supermemory:{session_id}:latest"),
+            &metrics,
+            "observability",
+        )
+        .await?;
+
+        Ok(metrics)
+    }
     pub async fn persist_swarm_observability(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
+        governance_scope: &GovernanceTelemetryScope,
         outcome: &SwarmOutcome,
         capability_lifecycle: &CapabilityLifecycleReport,
         verifier_queue_depth: usize,
@@ -219,7 +318,9 @@ impl ObservabilityKernel {
                 .clone(),
         };
         let operations_report = self.operations_report(session_id, outcome);
-        let resilience_report = self.resilience_report(db, session_id, &outcome.execution_reports).await?;
+        let resilience_report = self
+            .resilience_report(db, session_id, &outcome.execution_reports)
+            .await?;
         let business_report = self
             .business_report(
                 db,
@@ -228,9 +329,76 @@ impl ObservabilityKernel {
                 outcome.validation.ready,
             )
             .await?;
+        let promotion_events = db
+            .list_knowledge_by_prefix(&format!("eventlog:{session_id}:"))
+            .await?
+            .into_iter()
+            .filter_map(|record| {
+                serde_json::from_str::<crate::observability::event_stream::EventEnvelope>(
+                    &record.value,
+                )
+                .ok()
+            })
+            .collect::<Vec<_>>();
+        let promotion_total = promotion_events
+            .iter()
+            .filter(|event| event.kind == "verifier.promotion_decision")
+            .count();
+        let promotion_passed = promotion_events
+            .iter()
+            .filter(|event| {
+                event.kind == "verifier.promotion_decision"
+                    && event
+                        .payload
+                        .get("approved")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+            })
+            .count();
+        let human_view = HumanFacingObservability {
+            session_id: session_id.to_string(),
+            dashboard: dashboard.clone(),
+            operations_report: operations_report.clone(),
+            resilience_report: resilience_report.clone(),
+            report_channels: vec!["dashboard".into(), "reports".into(), "replay".into()],
+        };
+        let total_reports = route_analytics.total_reports.max(1) as f32;
+        let verifier_failure_rate =
+            (route_analytics.guarded_reports as f32 / total_reports).clamp(0.0, 1.0);
+        let avg_capability_health = if capability_lifecycle.entries.is_empty() {
+            1.0
+        } else {
+            capability_lifecycle
+                .entries
+                .iter()
+                .map(|entry| entry.average_health)
+                .sum::<f32>()
+                / capability_lifecycle.entries.len() as f32
+        };
+        let system_telemetry = SystemTelemetrySnapshot {
+            session_id: session_id.to_string(),
+            route_quality_score: outcome.verifier_report.overall_score.clamp(0.0, 1.0),
+            verifier_failure_rate,
+            capability_trust_decay: (1.0 - avg_capability_health.clamp(0.0, 1.0)).clamp(0.0, 1.0),
+            promotion_success_rate: if promotion_total == 0 {
+                1.0
+            } else {
+                promotion_passed as f32 / promotion_total as f32
+            },
+            open_circuit_count: failure_forensics.blocked_tools.len()
+                + failure_forensics.approval_gated_tools.len(),
+        };
+        let telemetry_snapshot = crate::observability::collector::collect_and_persist(
+            db,
+            session_id,
+            governance_scope,
+            &outcome.execution_reports,
+        )
+        .await?;
+        crate::observability::query_plane::persist_unified_query_view(db, session_id, None).await?;
         let product_ops = ProductOpsSnapshot {
             session_id: session_id.to_string(),
-            dashboard_endpoint_hint: format!("spacetimedb://observability/{session_id}/dashboard"),
+            dashboard_endpoint_hint: format!("state_store://observability/{session_id}/dashboard"),
             capability_lifecycle: capability_lifecycle.clone(),
             verifier_queue_depth,
         };
@@ -307,14 +475,38 @@ impl ObservabilityKernel {
             "observability",
         )
         .await?;
+        db.upsert_json_knowledge(
+            format!("observability:{session_id}:human-view"),
+            &human_view,
+            "observability",
+        )
+        .await?;
+        db.upsert_json_knowledge(
+            format!("observability:{session_id}:system-telemetry"),
+            &system_telemetry,
+            "observability",
+        )
+        .await?;
+        db.upsert_json_knowledge(
+            format!("observability:{session_id}:telemetry-collector"),
+            &telemetry_snapshot,
+            "observability",
+        )
+        .await?;
 
         let trace = TraceEnvelope {
             session_id: session_id.to_string(),
             span_name: "swarm.completed".into(),
-            level: if outcome.validation.ready { "info".into() } else { "warn".into() },
+            level: if outcome.validation.ready {
+                "info".into()
+            } else {
+                "warn".into()
+            },
             detail: format!(
                 "validation_ready={} verifier_score={:.2} deployment_profile={}",
-                outcome.validation.ready, outcome.verifier_report.overall_score, self.deployment.profile
+                outcome.validation.ready,
+                outcome.verifier_report.overall_score,
+                self.deployment.profile
             ),
             created_at_ms: crate::orchestration::current_time_ms(),
         };
@@ -344,7 +536,7 @@ impl ObservabilityKernel {
 
     async fn business_report(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         reports: &[ExecutionReport],
         validation_ready: bool,
@@ -477,7 +669,10 @@ impl ObservabilityKernel {
             )
             .await?;
             db.upsert_json_knowledge(
-                format!("business:revenue-event:{session_id}:{}", report.task.task_id),
+                format!(
+                    "business:revenue-event:{session_id}:{}",
+                    report.task.task_id
+                ),
                 &revenue_event,
                 "business",
             )
@@ -541,9 +736,7 @@ impl ObservabilityKernel {
             breach_tasks: breach_tasks.clone(),
             summary: format!(
                 "delivered={} breached={} sla_success={:.2}",
-                delivered_orders,
-                breached_orders,
-                sla_success_ratio
+                delivered_orders, breached_orders, sla_success_ratio
             ),
         };
         let report_trace_id = format!("trace:{session_id}:business-summary");
@@ -617,7 +810,7 @@ impl ObservabilityKernel {
 
     async fn resilience_report(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         reports: &[ExecutionReport],
     ) -> Result<ResilienceReport> {
@@ -681,29 +874,31 @@ impl ObservabilityKernel {
             manual_takeover_events,
             summary: format!(
                 "failovers={} recovered={} mttr_ms={:?} key_availability={:.2}",
-                failover_events,
-                recovered,
-                mttr_ms,
-                key_task_availability
+                failover_events, recovered, mttr_ms, key_task_availability
             ),
         })
     }
 
-    async fn cost_report(&self, db: &SpacetimeDb, session_id: &str) -> Result<CostReportRecord> {
+    async fn cost_report(&self, db: &StateStore, session_id: &str) -> Result<CostReportRecord> {
         let lease = db.get_session_lease(session_id).await?;
         let (tenant_id, account_id) = if let Some(lease) = lease {
-            let account_id = format!("{}:{}:{}", lease.tenant_id, lease.principal_id, lease.policy_id);
+            let account_id = format!(
+                "{}:{}:{}",
+                lease.tenant_id, lease.principal_id, lease.policy_id
+            );
             (lease.tenant_id, account_id)
         } else {
-            ("tenant:default".into(), "tenant:default:principal:unknown:policy:default".into())
+            (
+                "tenant:default".into(),
+                "tenant:default:principal:unknown:policy:default".into(),
+            )
         };
         let costs = db
             .list_cost_attribution_by_session(&tenant_id, session_id)
             .await
             .unwrap_or_default();
-        let (token_cost_micros, tool_cost_micros, duration_cost_micros, total_cost_micros) = costs
-            .iter()
-            .fold((0u64, 0u64, 0u64, 0u64), |acc, item| {
+        let (token_cost_micros, tool_cost_micros, duration_cost_micros, total_cost_micros) =
+            costs.iter().fold((0u64, 0u64, 0u64, 0u64), |acc, item| {
                 (
                     acc.0.saturating_add(item.token_cost_micros),
                     acc.1.saturating_add(item.tool_cost_micros),
@@ -717,7 +912,7 @@ impl ObservabilityKernel {
             .unwrap_or_default();
         let ledger_settled = ledger_entries
             .iter()
-            .filter(|entry| entry.kind == autoloop_spacetimedb_adapter::SpendLedgerKind::Settle)
+            .filter(|entry| entry.kind == autoloop_state_adapter::SpendLedgerKind::Settle)
             .map(|entry| entry.amount_micros.max(0) as u64)
             .sum::<u64>();
         let reconciliation_ok = ledger_settled >= total_cost_micros;
@@ -732,7 +927,11 @@ impl ObservabilityKernel {
         })
     }
 
-    fn route_analytics(&self, session_id: &str, reports: &[ExecutionReport]) -> RouteAnalyticsRecord {
+    fn route_analytics(
+        &self,
+        session_id: &str,
+        reports: &[ExecutionReport],
+    ) -> RouteAnalyticsRecord {
         let total_reports = reports.len();
         let treatment_count = reports
             .iter()
@@ -771,7 +970,11 @@ impl ObservabilityKernel {
         }
     }
 
-    fn failure_forensics(&self, session_id: &str, reports: &[ExecutionReport]) -> FailureForensicsRecord {
+    fn failure_forensics(
+        &self,
+        session_id: &str,
+        reports: &[ExecutionReport],
+    ) -> FailureForensicsRecord {
         let failing_tasks = reports
             .iter()
             .filter(|report| report.outcome_score <= 0)
@@ -784,7 +987,11 @@ impl ObservabilityKernel {
             .collect::<Vec<_>>();
         let approval_gated_tools = reports
             .iter()
-            .filter(|report| report.guard_decision.eq_ignore_ascii_case("requiresapproval"))
+            .filter(|report| {
+                report
+                    .guard_decision
+                    .eq_ignore_ascii_case("requiresapproval")
+            })
             .filter_map(|report| report.tool_used.clone())
             .collect::<Vec<_>>();
         let primary_failure_mode = if !blocked_tools.is_empty() {
@@ -836,7 +1043,11 @@ impl ObservabilityKernel {
                 .map(|case| {
                     format!(
                         "{} v{} status={} approval={} health={:.2}",
-                        case.tool_name, case.version, case.status, case.approval_status, case.health_score
+                        case.tool_name,
+                        case.version,
+                        case.status,
+                        case.approval_status,
+                        case.health_score
                     )
                 })
                 .take(self.config.report_top_k)
@@ -845,6 +1056,11 @@ impl ObservabilityKernel {
     }
 }
 
+fn count_non_latest_records(keys: Vec<String>) -> usize {
+    keys.into_iter()
+        .filter(|key| !key.ends_with(":latest"))
+        .count()
+}
 fn service_tier_for_report(report: &ExecutionReport) -> ServiceTier {
     if report.task.role.eq_ignore_ascii_case("security") {
         ServiceTier::Premium
@@ -872,7 +1088,9 @@ fn estimate_revenue_micros(
 
 fn is_sla_breach(report: &ExecutionReport, tier: &ServiceTier) -> bool {
     if report.guard_decision.eq_ignore_ascii_case("blocked")
-        || report.guard_decision.eq_ignore_ascii_case("requiresapproval")
+        || report
+            .guard_decision
+            .eq_ignore_ascii_case("requiresapproval")
     {
         return true;
     }
@@ -920,11 +1138,11 @@ mod tests {
             &crate::config::AppConfig::default().observability,
             &crate::config::AppConfig::default().deployment,
         );
-        let db = autoloop_spacetimedb_adapter::SpacetimeDb::from_config(
-            &autoloop_spacetimedb_adapter::SpacetimeDbConfig {
+        let db = autoloop_state_adapter::StateStore::from_config(
+            &autoloop_state_adapter::StateStoreConfig {
                 enabled: true,
-                backend: autoloop_spacetimedb_adapter::SpacetimeBackend::InMemory,
-                uri: "http://spacetimedb:3000".into(),
+                backend: autoloop_state_adapter::StateStoreBackend::InMemory,
+                uri: "http://state_store:3000".into(),
                 module_name: "autoloop_core".into(),
                 namespace: "autoloop".into(),
                 pool_size: 4,
@@ -949,11 +1167,11 @@ mod tests {
             &crate::config::AppConfig::default().observability,
             &crate::config::AppConfig::default().deployment,
         );
-        let db = autoloop_spacetimedb_adapter::SpacetimeDb::from_config(
-            &autoloop_spacetimedb_adapter::SpacetimeDbConfig {
+        let db = autoloop_state_adapter::StateStore::from_config(
+            &autoloop_state_adapter::StateStoreConfig {
                 enabled: true,
-                backend: autoloop_spacetimedb_adapter::SpacetimeBackend::InMemory,
-                uri: "http://spacetimedb:3000".into(),
+                backend: autoloop_state_adapter::StateStoreBackend::InMemory,
+                uri: "http://state_store:3000".into(),
                 module_name: "autoloop_core".into(),
                 namespace: "autoloop".into(),
                 pool_size: 4,
@@ -968,11 +1186,13 @@ mod tests {
             .await
             .expect("business");
         assert!(business.sla.breached_orders >= 1);
-        assert!(business
-            .sla
-            .breach_tasks
-            .iter()
-            .any(|task| task == "task-breach"));
+        assert!(
+            business
+                .sla
+                .breach_tasks
+                .iter()
+                .any(|task| task == "task-breach")
+        );
     }
 
     #[tokio::test]
@@ -981,18 +1201,18 @@ mod tests {
             &crate::config::AppConfig::default().observability,
             &crate::config::AppConfig::default().deployment,
         );
-        let db = autoloop_spacetimedb_adapter::SpacetimeDb::from_config(
-            &autoloop_spacetimedb_adapter::SpacetimeDbConfig {
+        let db = autoloop_state_adapter::StateStore::from_config(
+            &autoloop_state_adapter::StateStoreConfig {
                 enabled: true,
-                backend: autoloop_spacetimedb_adapter::SpacetimeBackend::InMemory,
-                uri: "http://spacetimedb:3000".into(),
+                backend: autoloop_state_adapter::StateStoreBackend::InMemory,
+                uri: "http://state_store:3000".into(),
                 module_name: "autoloop_core".into(),
                 namespace: "autoloop".into(),
                 pool_size: 4,
             },
         );
         let now = crate::orchestration::current_time_ms();
-        db.upsert_cost_attribution(autoloop_spacetimedb_adapter::CostAttribution {
+        db.upsert_cost_attribution(autoloop_state_adapter::CostAttribution {
             attribution_id: "attr-task-cost".into(),
             tenant_id: "tenant:default".into(),
             principal_id: "principal:test".into(),
@@ -1031,11 +1251,11 @@ mod tests {
     async fn p13_persist_swarm_observability_writes_business_reports() {
         let config = crate::config::AppConfig::default();
         let kernel = ObservabilityKernel::from_config(&config.observability, &config.deployment);
-        let db = autoloop_spacetimedb_adapter::SpacetimeDb::from_config(
-            &autoloop_spacetimedb_adapter::SpacetimeDbConfig {
+        let db = autoloop_state_adapter::StateStore::from_config(
+            &autoloop_state_adapter::StateStoreConfig {
                 enabled: true,
-                backend: autoloop_spacetimedb_adapter::SpacetimeBackend::InMemory,
-                uri: "http://spacetimedb:3000".into(),
+                backend: autoloop_state_adapter::StateStoreBackend::InMemory,
+                uri: "http://state_store:3000".into(),
                 module_name: "autoloop_core".into(),
                 namespace: "autoloop".into(),
                 pool_size: 4,
@@ -1127,6 +1347,16 @@ mod tests {
             .persist_swarm_observability(
                 &db,
                 "session-p13",
+                &crate::orchestration::governance_telemetry_scope::GovernanceTelemetryScope {
+                    scope_id: "gov-scope:session-p13".into(),
+                    session_id: "session-p13".into(),
+                    tenant_scope: "tenant-default".into(),
+                    risk_tier: "low".into(),
+                    privacy_level: "internal".into(),
+                    approval_required: false,
+                    retention_hours: 168,
+                    redaction_fields: vec![],
+                },
                 &outcome,
                 &crate::tools::CapabilityLifecycleReport {
                     total_lineages: 0,
@@ -1140,30 +1370,36 @@ mod tests {
             .await
             .expect("persist");
 
-        assert!(db
-            .get_knowledge("observability:session-p13:business-report")
-            .await
-            .expect("read")
-            .is_some());
-        assert!(db
-            .get_knowledge("observability:session-p13:margin-report")
-            .await
-            .expect("read")
-            .is_some());
-        assert!(db
-            .get_knowledge("observability:session-p13:sla-report")
-            .await
-            .expect("read")
-            .is_some());
-        assert!(db
-            .get_knowledge("observability:session-p13:work-orders")
-            .await
-            .expect("read")
-            .is_some());
-        assert!(db
-            .get_knowledge("observability:session-p13:revenue-events")
-            .await
-            .expect("read")
-            .is_some());
+        assert!(
+            db.get_knowledge("observability:session-p13:business-report")
+                .await
+                .expect("read")
+                .is_some()
+        );
+        assert!(
+            db.get_knowledge("observability:session-p13:margin-report")
+                .await
+                .expect("read")
+                .is_some()
+        );
+        assert!(
+            db.get_knowledge("observability:session-p13:sla-report")
+                .await
+                .expect("read")
+                .is_some()
+        );
+        assert!(
+            db.get_knowledge("observability:session-p13:work-orders")
+                .await
+                .expect("read")
+                .is_some()
+        );
+        assert!(
+            db.get_knowledge("observability:session-p13:revenue-events")
+                .await
+                .expect("read")
+                .is_some()
+        );
     }
 }
+

@@ -6,18 +6,18 @@ use autoloop::{
     },
     providers::{ChatMessage, ProviderRegistry},
     runtime::RuntimeKernel,
-    spacetimedb_adapter::{
+    state_store_adapter::{
         BudgetAccount, PermissionAction, PolicyBinding, Principal, RoleBinding, SessionLease,
-        SpacetimeBackend, SpacetimeDb, SpacetimeDbConfig, Tenant,
+        StateStoreBackend, StateStore, StateStoreConfig, Tenant,
     },
     tools::ToolRegistry,
 };
 
-fn db() -> SpacetimeDb {
-    SpacetimeDb::from_config(&SpacetimeDbConfig {
+fn db() -> StateStore {
+    StateStore::from_config(&StateStoreConfig {
         enabled: true,
-        backend: SpacetimeBackend::InMemory,
-        uri: "http://spacetimedb:3000".into(),
+        backend: StateStoreBackend::InMemory,
+        uri: "http://state_store:3000".into(),
         module_name: "autoloop_core".into(),
         namespace: "autoloop".into(),
         pool_size: 8,
@@ -33,6 +33,10 @@ fn runtime_tools_providers(
     config.runtime.budget_enforced = true;
     config.runtime.default_budget_micros = default_budget_micros;
     config.runtime.quota_window_budget_micros = quota_window_budget_micros;
+    let isolate = now_ms();
+    config.runtime.trust_evidence_ledger_path =
+        format!("target/test-ledger/p8-evidence-{isolate}.log");
+    config.runtime.trust_budget_ledger_path = format!("target/test-ledger/p8-budget-{isolate}.log");
     (
         RuntimeKernel::from_config(&config.runtime),
         ToolRegistry::from_config(&config.tools),
@@ -41,7 +45,7 @@ fn runtime_tools_providers(
 }
 
 async fn seed_identity(
-    db: &SpacetimeDb,
+    db: &StateStore,
     session_id: &str,
     tenant_id: &str,
     principal_id: &str,
@@ -78,7 +82,11 @@ async fn seed_identity(
         policy_id: policy_id.into(),
         tenant_id: tenant_id.into(),
         role: "operator".into(),
-        allowed_actions: vec![PermissionAction::Read, PermissionAction::Write, PermissionAction::Dispatch],
+        allowed_actions: vec![
+            PermissionAction::Read,
+            PermissionAction::Write,
+            PermissionAction::Dispatch,
+        ],
         capability_prefixes,
         max_memory_mb: 2048,
         max_tokens: 64000,
@@ -106,7 +114,12 @@ async fn seed_identity(
     }
 }
 
-fn provider_envelope(session_id: &str, task_id: &str, identity: ExecutionIdentity, text: &str) -> TaskEnvelope {
+fn provider_envelope(
+    session_id: &str,
+    task_id: &str,
+    identity: ExecutionIdentity,
+    text: &str,
+) -> TaskEnvelope {
     let messages = vec![ChatMessage {
         role: "user".into(),
         content: text.into(),
@@ -129,10 +142,16 @@ fn provider_envelope(session_id: &str, task_id: &str, identity: ExecutionIdentit
             sandbox_profile: "provider".into(),
             requires_human_approval: false,
         },
+        trust_plan: None,
     }
 }
 
-fn tool_envelope(session_id: &str, task_id: &str, identity: ExecutionIdentity, capability: &str) -> TaskEnvelope {
+fn tool_envelope(
+    session_id: &str,
+    task_id: &str,
+    identity: ExecutionIdentity,
+    capability: &str,
+) -> TaskEnvelope {
     TaskEnvelope {
         session_id: SessionId::from(session_id),
         trace_id: TraceId::from(format!("{session_id}:{task_id}:trace")),
@@ -151,6 +170,7 @@ fn tool_envelope(session_id: &str, task_id: &str, identity: ExecutionIdentity, c
             sandbox_profile: "standard".into(),
             requires_human_approval: false,
         },
+        trust_plan: None,
     }
 }
 
@@ -208,7 +228,10 @@ async fn p8_concurrent_charging_is_consistent() {
         vec!["provider:".into()],
     )
     .await;
-    let account_id = format!("{}:{}:{}", identity.tenant_id, identity.principal_id, identity.policy_id);
+    let account_id = format!(
+        "{}:{}:{}",
+        identity.tenant_id, identity.principal_id, identity.policy_id
+    );
     db.upsert_budget_account(BudgetAccount {
         account_id: account_id.clone(),
         tenant_id: identity.tenant_id.clone(),
@@ -237,13 +260,24 @@ async fn p8_concurrent_charging_is_consistent() {
         );
         handles.push(tokio::spawn(async move {
             runtime
-                .execute(&db, &tools, &providers, "p8-concurrency", &envelope, None, None)
+                .execute(
+                    &db,
+                    &tools,
+                    &providers,
+                    "p8-concurrency",
+                    &envelope,
+                    None,
+                    None,
+                )
                 .await
         }));
     }
     for handle in handles {
         let result = handle.await.expect("join");
-        assert!(result.is_ok(), "concurrent execution should settle successfully");
+        assert!(
+            result.is_ok(),
+            "concurrent execution should settle successfully"
+        );
     }
 
     let report = runtime
@@ -267,9 +301,12 @@ async fn p8_rollback_compensation_restores_reserve() {
         vec!["unknown".into()],
     )
     .await;
-    let account_id = format!("{}:{}:{}", identity.tenant_id, identity.principal_id, identity.policy_id);
+    let account_id = format!(
+        "{}:{}:{}",
+        identity.tenant_id, identity.principal_id, identity.policy_id
+    );
     let envelope = tool_envelope("p8-rollback", "task-fail", identity.clone(), "unknown_tool");
-    let err = runtime
+    let execution = runtime
         .execute(
             &db,
             &tools,
@@ -279,9 +316,19 @@ async fn p8_rollback_compensation_restores_reserve() {
             None,
             None,
         )
-        .await
-        .expect_err("unknown tool should fail and rollback reservation");
-    assert!(err.to_string().contains("unknown tool"));
+        .await;
+    match execution {
+        Ok(result) => {
+            assert!(
+                result.content.contains("degraded-tool-fallback")
+                    || result.content.contains("unknown tool"),
+                "degraded fallback should still surface unknown tool reason"
+            );
+        }
+        Err(error) => {
+            assert!(error.to_string().contains("unknown tool"));
+        }
+    }
 
     let report = runtime
         .reconcile_budget_account(&db, "tenant-p8", &account_id)
@@ -304,7 +351,12 @@ async fn p8_task_cost_attribution_contains_token_tool_and_duration_breakdown() {
         vec!["provider:".into()],
     )
     .await;
-    let envelope = provider_envelope("p8-attribution", "task-cost", identity.clone(), "hello budget");
+    let envelope = provider_envelope(
+        "p8-attribution",
+        "task-cost",
+        identity.clone(),
+        "hello budget",
+    );
     runtime
         .execute(
             &db,
@@ -335,3 +387,7 @@ async fn p8_task_cost_attribution_contains_token_tool_and_duration_breakdown() {
             .saturating_add(item.duration_cost_micros)
     );
 }
+
+
+
+

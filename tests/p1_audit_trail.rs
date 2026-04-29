@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use autoloop::session::{
-    audit::InMemoryAuditSink,
-    machine::WorkflowMachine,
-    signal::WorkflowSignal,
+    audit::InMemoryAuditSink, machine::WorkflowMachine, signal::WorkflowSignal,
 };
 
 #[tokio::test]
@@ -12,11 +10,17 @@ async fn each_transition_writes_audit_record() {
     let mut machine = WorkflowMachine::new("session-audit", sink.clone());
 
     machine
-        .apply(WorkflowSignal::IntentReceived, Some("intent entered".into()))
+        .apply(
+            WorkflowSignal::IntentReceived,
+            Some("intent entered".into()),
+        )
         .await
         .expect("intent transition");
     machine
-        .apply(WorkflowSignal::PolicyApproved, Some("policy approved".into()))
+        .apply(
+            WorkflowSignal::PolicyApproved,
+            Some("policy approved".into()),
+        )
         .await
         .expect("policy transition");
     machine
@@ -29,3 +33,6 @@ async fn each_transition_writes_audit_record() {
     assert_eq!(records[0].session_id, "session-audit");
     assert_eq!(records[0].reason.as_deref(), Some("intent entered"));
 }
+
+
+

@@ -6,8 +6,8 @@ use crate::rag::model::{
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 const STOPWORDS: &[&str] = &[
-    "A", "An", "And", "As", "At", "By", "For", "From", "In", "Into", "Of", "On", "Or", "The",
-    "To", "With",
+    "A", "An", "And", "As", "At", "By", "For", "From", "In", "Into", "Of", "On", "Or", "The", "To",
+    "With",
 ];
 
 const RELATION_HINTS: &[(&str, &str)] = &[
@@ -178,7 +178,8 @@ impl GraphModule {
     }
 
     pub fn rebuild_communities(&mut self, document_id: u64) -> CommunityBuildResult {
-        self.communities.retain(|community| community.document_id != document_id);
+        self.communities
+            .retain(|community| community.document_id != document_id);
 
         let entity_ids: Vec<u64> = self
             .mentions
@@ -203,7 +204,8 @@ impl GraphModule {
             .collect();
 
         let mut community_ids = Vec::new();
-        for (member_entity_ids, relationship_ids) in build_communities(&entity_ids, &relationships) {
+        for (member_entity_ids, relationship_ids) in build_communities(&entity_ids, &relationships)
+        {
             if member_entity_ids.is_empty() {
                 continue;
             }
@@ -292,7 +294,11 @@ impl GraphModule {
 
         self.chunks.extend(draft_chunks);
 
-        if let Some(document) = self.documents.iter_mut().find(|document| document.id == document_id) {
+        if let Some(document) = self
+            .documents
+            .iter_mut()
+            .find(|document| document.id == document_id)
+        {
             document.status = DocumentStatus::Chunked;
             document.chunk_count = chunk_ids.len() as u32;
         }
@@ -398,7 +404,11 @@ impl GraphModule {
 
     fn recompute_entity_weights(&mut self, document_id: u64) {
         let mut degree_map = BTreeMap::<u64, u32>::new();
-        for relationship in self.relationships.iter().filter(|r| r.document_id == document_id) {
+        for relationship in self
+            .relationships
+            .iter()
+            .filter(|r| r.document_id == document_id)
+        {
             *degree_map.entry(relationship.source_entity_id).or_default() += 1;
             *degree_map.entry(relationship.target_entity_id).or_default() += 1;
         }
@@ -417,8 +427,12 @@ impl GraphModule {
             if relationship.document_id != document_id {
                 continue;
             }
-            let left = *entity_weights.get(&relationship.source_entity_id).unwrap_or(&0);
-            let right = *entity_weights.get(&relationship.target_entity_id).unwrap_or(&0);
+            let left = *entity_weights
+                .get(&relationship.source_entity_id)
+                .unwrap_or(&0);
+            let right = *entity_weights
+                .get(&relationship.target_entity_id)
+                .unwrap_or(&0);
             relationship.weight =
                 relationship.evidence_chunk_ids.len() as u32 * 4 + (left + right) / 2;
         }
@@ -437,7 +451,11 @@ impl GraphModule {
             .filter(|relationship| relationship.document_id == document_id)
             .count() as u32;
 
-        if let Some(document) = self.documents.iter_mut().find(|document| document.id == document_id) {
+        if let Some(document) = self
+            .documents
+            .iter_mut()
+            .find(|document| document.id == document_id)
+        {
             document.entity_count = entity_ids.len() as u32;
             document.relationship_count = relationship_count;
             if document.chunk_count > 0 {
@@ -455,7 +473,12 @@ pub fn normalize_key(value: &str) -> String {
         .collect()
 }
 
-pub fn chunk_text(document_id: u64, text: &str, chunk_size: usize, overlap: usize) -> Vec<ChunkRecord> {
+pub fn chunk_text(
+    document_id: u64,
+    text: &str,
+    chunk_size: usize,
+    overlap: usize,
+) -> Vec<ChunkRecord> {
     let tokens: Vec<&str> = text.split_whitespace().collect();
     if tokens.is_empty() {
         return Vec::new();
@@ -613,7 +636,10 @@ fn detect_relation_type(sentence: &str) -> &'static str {
         .unwrap_or("RELATED_TO")
 }
 
-fn build_communities(entity_ids: &[u64], relationships: &[(u64, u64, u64)]) -> Vec<(Vec<u64>, Vec<u64>)> {
+fn build_communities(
+    entity_ids: &[u64],
+    relationships: &[(u64, u64, u64)],
+) -> Vec<(Vec<u64>, Vec<u64>)> {
     let mut parent = BTreeMap::<u64, u64>::new();
     for entity_id in entity_ids {
         parent.insert(*entity_id, *entity_id);

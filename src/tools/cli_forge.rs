@@ -1,5 +1,5 @@
+﻿use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
@@ -361,7 +361,9 @@ impl Tool for CliAnythingForgeTool {
         }
         let tool_name = format!("mcp::{server}::{capability_slug}");
         let manifest = build_manifest(tool_name.clone(), server.clone(), request)?;
-        self.registry.upsert_governed_manifest(manifest.clone()).await?;
+        self.registry
+            .upsert_governed_manifest(manifest.clone())
+            .await?;
 
         Ok(ToolResult {
             name: self.name().to_string(),
@@ -585,13 +587,17 @@ fn build_manifest(
     let source_repo = request
         .source_repo
         .unwrap_or_else(|| "autoloop/forged-capability".into());
-    let source_ref = request
-        .source_ref
-        .unwrap_or_else(|| format!("v{now_ms}"));
+    let source_ref = request.source_ref.unwrap_or_else(|| format!("v{now_ms}"));
     let artifact = CapabilityArtifact {
         artifact_id: format!("artifact:{capability_id}:{now_ms}"),
-        digest_sha256: format!("{:016x}", hash_seed(&format!("{capability_id}:{command_template}:{now_ms}"))),
-        source_uri: format!("mcp://{server}/{}", sanitize_segment(&request.capability_name)),
+        digest_sha256: format!(
+            "{:016x}",
+            hash_seed(&format!("{capability_id}:{command_template}:{now_ms}"))
+        ),
+        source_uri: format!(
+            "mcp://{server}/{}",
+            sanitize_segment(&request.capability_name)
+        ),
         build_epoch: now_ms,
     };
     let provenance = Provenance {
@@ -686,7 +692,10 @@ fn build_command_template(request: &McpToolForgeRequest) -> String {
     }
     for argument in &request.arguments {
         let placeholder = format!("{{{{{}}}}}", sanitize_segment(&argument.name));
-        parts.push(format!("--{} {placeholder}", sanitize_segment(&argument.name)));
+        parts.push(format!(
+            "--{} {placeholder}",
+            sanitize_segment(&argument.name)
+        ));
     }
     parts.join(" ")
 }
@@ -711,7 +720,11 @@ fn build_help_text(tool_name: &str, request: &McpToolForgeRequest) -> String {
         request.purpose,
         request.executable,
         request.output_mode,
-        if arg_list.is_empty() { "- none".into() } else { arg_list }
+        if arg_list.is_empty() {
+            "- none".into()
+        } else {
+            arg_list
+        }
     )
 }
 
@@ -874,13 +887,20 @@ fn render_value(value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::String(value) => value.clone(),
-        Value::Array(values) => values.iter().map(render_value).collect::<Vec<_>>().join(","),
+        Value::Array(values) => values
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(","),
         Value::Object(_) => value.to_string(),
     }
 }
 
 fn shell_escape(value: &str) -> String {
-    if value.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_./:".contains(ch)) {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "-_./:".contains(ch))
+    {
         value.to_string()
     } else {
         format!("\"{}\"", value.replace('"', "\\\""))
@@ -938,14 +958,30 @@ fn current_time_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn default_capability_version() -> u32 { 1 }
-fn default_capability_status() -> CapabilityStatus { CapabilityStatus::Active }
-fn default_approval_status() -> ApprovalStatus { ApprovalStatus::Verified }
-fn default_health_score() -> f32 { 0.8 }
-fn default_scope() -> CapabilityScope { CapabilityScope::TaskFamily }
-fn default_risk() -> CapabilityRisk { CapabilityRisk::Low }
-fn default_requested_by() -> String { "cli-agent".into() }
-fn default_trust_status() -> TrustStatus { TrustStatus::Pending }
+fn default_capability_version() -> u32 {
+    1
+}
+fn default_capability_status() -> CapabilityStatus {
+    CapabilityStatus::Active
+}
+fn default_approval_status() -> ApprovalStatus {
+    ApprovalStatus::Verified
+}
+fn default_health_score() -> f32 {
+    0.8
+}
+fn default_scope() -> CapabilityScope {
+    CapabilityScope::TaskFamily
+}
+fn default_risk() -> CapabilityRisk {
+    CapabilityRisk::Low
+}
+fn default_requested_by() -> String {
+    "cli-agent".into()
+}
+fn default_trust_status() -> TrustStatus {
+    TrustStatus::Pending
+}
 fn default_capability_artifact() -> CapabilityArtifact {
     CapabilityArtifact {
         artifact_id: "artifact:default".into(),
@@ -971,7 +1007,11 @@ fn default_provenance() -> Provenance {
         generated_by: "cli-agent".into(),
     }
 }
-fn default_sbom() -> Sbom { Sbom { components: Vec::new() } }
+fn default_sbom() -> Sbom {
+    Sbom {
+        components: Vec::new(),
+    }
+}
 fn default_trust_policy() -> TrustPolicy {
     TrustPolicy {
         required_signers: vec!["autoloop-ci".into(), "autoloop-operator".into()],
@@ -1023,7 +1063,7 @@ fn signature_value_for(signer: &str, algorithm: &SignatureAlgorithm, payload_has
 mod tests {
     use super::*;
     use crate::config::ToolsConfig;
-    use autoloop_spacetimedb_adapter::{SpacetimeBackend, SpacetimeDb, SpacetimeDbConfig};
+    use autoloop_state_adapter::{StateStoreBackend, StateStore, StateStoreConfig};
 
     #[tokio::test]
     async fn forge_tool_registers_new_mcp_capability() {
@@ -1054,7 +1094,11 @@ mod tests {
             .await
             .expect("forge tool");
 
-        assert!(result.content.contains("\"registered_tool_name\": \"mcp::local-mcp::image-batch-export\""));
+        assert!(
+            result
+                .content
+                .contains("\"registered_tool_name\": \"mcp::local-mcp::image-batch-export\"")
+        );
         assert!(registry.has_tool("mcp::local-mcp::image-batch-export"));
     }
 
@@ -1092,17 +1136,21 @@ mod tests {
             .await
             .expect("execute forged tool");
 
-        assert!(result.content.contains("\"delegate_tool\": \"mcp::local-mcp::invoke\""));
+        assert!(
+            result
+                .content
+                .contains("\"delegate_tool\": \"mcp::local-mcp::invoke\"")
+        );
         assert!(result.content.contains("diagram-cli export"));
         assert!(result.content.contains("--project D:/demo/project.drawio"));
     }
 
     #[tokio::test]
-    async fn forged_tools_persist_and_restore_from_spacetimedb() {
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+    async fn forged_tools_persist_and_restore_from_state_store() {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -1112,7 +1160,7 @@ mod tests {
             allow_shell: false,
             mcp_servers: vec!["local-mcp".into()],
         });
-        registry.attach_spacetimedb(db.clone());
+        registry.attach_state_store(db.clone());
 
         registry
             .execute(
@@ -1137,7 +1185,7 @@ mod tests {
             allow_shell: false,
             mcp_servers: vec!["local-mcp".into()],
         });
-        recovered.attach_spacetimedb(db);
+        recovered.attach_state_store(db);
         let restored = recovered
             .restore_persisted_manifests()
             .await
@@ -1171,10 +1219,12 @@ mod tests {
             .await
             .expect("forge");
 
-        assert!(registry
-            .execute("mcp::local-mcp::network-deploy", r#"{"target":"prod"}"#)
-            .await
-            .is_err());
+        assert!(
+            registry
+                .execute("mcp::local-mcp::network-deploy", r#"{"target":"prod"}"#)
+                .await
+                .is_err()
+        );
 
         registry
             .execute(
@@ -1183,10 +1233,12 @@ mod tests {
             )
             .await
             .expect("verify");
-        assert!(registry
-            .execute("mcp::local-mcp::network-deploy", r#"{"target":"prod"}"#)
-            .await
-            .is_ok());
+        assert!(
+            registry
+                .execute("mcp::local-mcp::network-deploy", r#"{"target":"prod"}"#)
+                .await
+                .is_ok()
+        );
 
         registry
             .execute(
@@ -1195,10 +1247,12 @@ mod tests {
             )
             .await
             .expect("deprecate");
-        assert!(registry
-            .execute("mcp::local-mcp::network-deploy", r#"{"target":"prod"}"#)
-            .await
-            .is_err());
+        assert!(
+            registry
+                .execute("mcp::local-mcp::network-deploy", r#"{"target":"prod"}"#)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1354,3 +1408,4 @@ mod tests {
         assert!(result.is_err());
     }
 }
+

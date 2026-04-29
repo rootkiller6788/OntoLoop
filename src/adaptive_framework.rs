@@ -118,7 +118,11 @@ struct GapDrivenTemplateGenerator {
 
 impl GapDrivenTemplateGenerator {
     fn new(gamma: f32, lam: f32, horizon: usize) -> Self {
-        Self { gamma, lam, horizon }
+        Self {
+            gamma,
+            lam,
+            horizon,
+        }
     }
 
     fn generate_duel_batch(&self, gap: &GapSignal) -> DuelBatch {
@@ -284,7 +288,8 @@ pub fn build_prompt_template_bundle(
     }
     if lowered_research.contains("official") || lowered_research.contains("fresh") {
         system_instructions.push(
-            "Prefer recent official or first-party evidence over older or derivative summaries.".into(),
+            "Prefer recent official or first-party evidence over older or derivative summaries."
+                .into(),
         );
     }
 
@@ -460,7 +465,11 @@ fn default_gap_signal() -> GapSignal {
 
 fn evaluate_batch_effect(batch: &DuelBatch) -> TemplateEffect {
     let before = batch.gap.baseline_confidence;
-    let weighted_sum: f32 = batch.tasks.iter().map(|task| task.weight * task.expected_gain).sum();
+    let weighted_sum: f32 = batch
+        .tasks
+        .iter()
+        .map(|task| task.weight * task.expected_gain)
+        .sum();
     let after = (before + weighted_sum).clamp(0.0, 1.0);
     let gain = (after - before).max(0.0);
     let relative = if before > 1e-8 {
@@ -542,10 +551,12 @@ mod tests {
         assert!(!bundle.gaps.is_empty());
         assert!(!bundle.duel_batches.is_empty());
         assert!(!bundle.feedback.is_empty());
-        assert!(bundle
-            .all_directives()
-            .iter()
-            .any(|line| line.contains("Verified capability hints")));
+        assert!(
+            bundle
+                .all_directives()
+                .iter()
+                .any(|line| line.contains("Verified capability hints"))
+        );
     }
 
     #[test]

@@ -1,10 +1,10 @@
-FROM rust:1.86 AS builder
+﻿FROM rust:1.86 AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
-COPY autoloop-spacetimedb-adapter ./autoloop-spacetimedb-adapter
-COPY spacetimedb ./spacetimedb
+COPY autoloop-state-adapter ./autoloop-state-adapter
+COPY state_store ./state_store
 
 RUN cargo build --release --workspace --bin autoloop
 
@@ -23,3 +23,4 @@ ENV AUTOLOOP_CONFIG=/srv/autoloop/config/autoloop.prod.toml
 EXPOSE 3000
 
 CMD ["autoloop", "--config", "/srv/autoloop/config/autoloop.prod.toml"]
+

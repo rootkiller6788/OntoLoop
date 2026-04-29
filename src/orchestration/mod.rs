@@ -1,30 +1,56 @@
-use std::collections::HashMap;
+﻿pub mod focus_board;
+pub mod governance_telemetry_scope;
+pub mod knowledge_context;
+pub mod org_context;
+pub mod response_builder;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use anyhow::Result;
-use autoloop_spacetimedb_adapter::{KnowledgeRecord, SpacetimeDb};
+use autoloop_state_adapter::{KnowledgeRecord, StateStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
     adaptive_framework::{PromptTemplateProfile, build_prompt_template_bundle},
+    agent::workspace_loader::WorkspaceLoader,
     agentevolver_task_core::AgentEvolverTaskPack,
     contracts::{
+        capability::CapabilityIntent,
+        context::{GovernanceContext, KnowledgeContext},
+        focus_trigger::{FocusBoard, TriggerRef},
+        identity::AgentWorkspaceSnapshot,
         ids::{CapabilityId, SessionId, TaskId, TraceId},
+        org::OrganizationContext,
         types::{ConstraintSet, ExecutionIdentity, TaskEnvelope},
     },
-    memory::{JointRoutingEvidence, LearningAssetKind, LearningScorer, MemorySubsystem, RetrievalEvidence, WeightedLearningScorer},
-    providers::{ChatMessage, OptimizationProposal, OptimizationSignal, PromptPolicyOverlay, ProviderRegistry},
+    memory::{
+        JointRoutingEvidence, LearningAssetKind, LearningScorer, MemorySubsystem,
+        RetrievalEvidence, WeightedLearningScorer,
+    },
+    providers::{
+        ChatMessage, OptimizationProposal, OptimizationSignal, PromptPolicyOverlay,
+        ProviderRegistry,
+    },
     rag::{GraphKnowledgeUpdate, GraphRoutingSignals, RagSubsystem},
     runtime::{DegradeProfileKind, RuntimeKernel, VerifierReport, VerifierVerdict},
     session::{
-        SessionStore,
-        audit::SpacetimeAuditSink,
-        machine::WorkflowMachine,
-        signal::WorkflowSignal,
+        SessionStore, audit::StateAuditSink, machine::WorkflowMachine, signal::WorkflowSignal,
     },
-    tools::ToolRegistry,
+    skills::foundry::{extract_first_principles, normalize_intake, promotion_suggestion, route_layer},
+    tools::{CapabilityRisk, ToolRegistry},
 };
+
+use self::focus_board::FocusBoardBuilder;
+use self::knowledge_context::KnowledgeContextResolver;
+use self::org_context::OrganizationContextResolver;
+use crate::contracts::ports::{
+    CapabilityIntentSelectorPort, KnowledgeContextInjector, OrganizationContextInjector,
+};
+use crate::plugins::gitmemory_core::{GitmemoryCoreKernel, GovernancePhase};
+use crate::runtime::execution_fabric::{ExecutionFabricTrace, persist_execution_fabric_trace};
+use crate::runtime::trigger_runtime::TriggerRuntimeEngine;
+use crate::security::capability_admission::{CapabilityAdmissionEngine, CapabilityIntentSelector};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequirementBrief {
@@ -111,6 +137,12 @@ pub struct ValidationReport {
     pub summary: String,
     pub follow_up_tasks: Vec<SwarmTask>,
     pub verifier_summary: String,
+}
+
+#[derive(Debug, Clone)]
+struct GovernanceBlockSummary {
+    reason: String,
+    evidence_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,7 +255,7 @@ pub struct OrchestrationKernel {
     memory: MemorySubsystem,
     rag: RagSubsystem,
     runtime: RuntimeKernel,
-    spacetimedb: SpacetimeDb,
+    state_store: StateStore,
     gray_routing_ratio: f32,
     routing_takeover_threshold: f32,
 }
@@ -236,7 +268,7 @@ impl OrchestrationKernel {
         memory: MemorySubsystem,
         rag: RagSubsystem,
         runtime: RuntimeKernel,
-        spacetimedb: SpacetimeDb,
+        state_store: StateStore,
         gray_routing_ratio: f32,
         routing_takeover_threshold: f32,
     ) -> Self {
@@ -247,7 +279,7 @@ impl OrchestrationKernel {
             memory,
             rag,
             runtime,
-            spacetimedb,
+            state_store,
             gray_routing_ratio,
             routing_takeover_threshold,
         }
@@ -260,43 +292,118 @@ impl OrchestrationKernel {
     ) -> Result<SwarmOutcome> {
         let mut workflow = WorkflowMachine::new(
             session_id,
-            Arc::new(SpacetimeAuditSink::with_source(
-                self.spacetimedb.clone(),
+            Arc::new(StateAuditSink::with_source(
+                self.state_store.clone(),
                 "orchestration-workflow",
             )),
         );
-        let _ = workflow.apply(WorkflowSignal::IntentReceived, Some("requirement received".into())).await;
-        let _ = workflow.apply(WorkflowSignal::PolicyApproved, Some("policy baseline approved".into())).await;
-        let brief = self.requirement_agent_dialogue(session_id, request).await?;
-        let routing_context = self.load_routing_context(session_id, request).await?;
+        let _ = workflow
+            .apply(
+                WorkflowSignal::IntentReceived,
+                Some("requirement received".into()),
+            )
+            .await;
+        let mut effective_request = request.to_string();
+        if let Some(policy_reason) = policy_requires_revision(request) {
+            let _ = workflow
+                .apply(
+                    WorkflowSignal::PolicyRejected,
+                    Some(format!("policy rejected: {policy_reason}")),
+                )
+                .await;
+            effective_request = format!(
+                "Policy revise required before planning. Keep intent, remove unsafe instruction patterns. Original request:\n{}",
+                request
+            );
+            let _ = workflow
+                .apply(
+                    WorkflowSignal::PolicyApproved,
+                    Some("policy revised and approved".into()),
+                )
+                .await;
+        } else {
+            let _ = workflow
+                .apply(
+                    WorkflowSignal::PolicyApproved,
+                    Some("policy baseline approved".into()),
+                )
+                .await;
+        }
+        let brief = self
+            .requirement_agent_dialogue(session_id, &effective_request)
+            .await?;
+        let focus_board = self.build_focus_board(session_id, &brief).await?;
+        let trigger_refs = self
+            .register_focus_triggers(session_id, &focus_board)
+            .await?;
+        self.persist_focus_runtime_snapshots(session_id, &focus_board, &trigger_refs)
+            .await?;
+        let routing_context = self
+            .load_routing_context(session_id, &effective_request)
+            .await?;
         let optimization_proposal = self.optimization_proposal(&brief, &routing_context).await?;
-        let ceo_summary = self.ceo_summary(session_id, &brief, &routing_context).await?;
-        let _ = workflow.apply(WorkflowSignal::PlanCommitted, Some("swarm plan committed".into())).await;
-        let tasks = self.build_swarm_team(&brief, &routing_context, &ceo_summary, &optimization_proposal);
-        let _ = workflow.apply(WorkflowSignal::TaskScheduled, Some("tasks scheduled".into())).await;
+        let ceo_summary = self
+            .ceo_summary(session_id, &brief, &routing_context)
+            .await?;
+        let _ = workflow
+            .apply(
+                WorkflowSignal::PlanCommitted,
+                Some("swarm plan committed".into()),
+            )
+            .await;
+        let tasks = self.build_swarm_team(
+            &brief,
+            &routing_context,
+            &ceo_summary,
+            &optimization_proposal,
+        );
+        let _ = workflow
+            .apply(
+                WorkflowSignal::TaskScheduled,
+                Some("tasks scheduled".into()),
+            )
+            .await;
         let deliberation = self
             .deliberate_swarm(session_id, &brief, &routing_context, &tasks, &ceo_summary)
             .await?;
-        let _ = workflow.apply(WorkflowSignal::ExecutionStarted, Some("swarm execution started".into())).await;
+        let _ = workflow
+            .apply(
+                WorkflowSignal::ExecutionStarted,
+                Some("swarm execution started".into()),
+            )
+            .await;
         let execution_reports = self
             .execute_swarm(session_id, &tasks, &brief, &routing_context)
             .await?;
         for report in &execution_reports {
             let signal = self.runtime.workflow_signal_from_execution_report(report);
-            let _ = workflow.apply(signal, Some("runtime execution outcome".into())).await;
+            let _ = workflow
+                .apply(signal, Some("runtime execution outcome".into()))
+                .await;
         }
-        let verifier_report = self
-            .runtime
-            .verify_swarm_outcome(&brief, &routing_context, &execution_reports, &self.tools);
+        let verifier_report = self.runtime.verify_swarm_outcome(
+            &brief,
+            &routing_context,
+            &execution_reports,
+            &self.tools,
+        );
         let verifier_signal = if verifier_report.verdict == VerifierVerdict::Pass {
             WorkflowSignal::VerifyPassed
         } else {
             WorkflowSignal::VerifyRejected
         };
-        let _ = workflow.apply(verifier_signal, Some("verifier completed".into())).await;
-        let _ = workflow.apply(WorkflowSignal::Closed, Some("workflow closed".into())).await;
-        let validation =
-            self.validate_outcome(&brief, &routing_context, &execution_reports, &verifier_report);
+        let _ = workflow
+            .apply(verifier_signal, Some("verifier completed".into()))
+            .await;
+        let _ = workflow
+            .apply(WorkflowSignal::Closed, Some("workflow closed".into()))
+            .await;
+        let validation = self.validate_outcome(
+            &brief,
+            &routing_context,
+            &execution_reports,
+            &verifier_report,
+        );
         let knowledge_update = self.rag.build_knowledge_update(
             session_id,
             &brief.original_request,
@@ -320,12 +427,171 @@ impl OrchestrationKernel {
         })
     }
 
+    async fn inject_organization_context(&self, session_id: &str) -> Result<OrganizationContext> {
+        let resolver = OrganizationContextResolver::new(self.state_store.clone());
+        let injector: &dyn OrganizationContextInjector = &resolver;
+        injector
+            .inject_context(&SessionId::from(session_id))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    fn governance_from_org_context(&self, org_context: &OrganizationContext) -> GovernanceContext {
+        GovernanceContext {
+            session_id: org_context.session_id.clone(),
+            tenant_id: org_context.tenant_id.clone(),
+            principal_id: org_context.principal_id.clone(),
+            policy_id: org_context.policy_id.clone(),
+            role: org_context.role.clone(),
+            approval_policy: org_context.approval_policy.clone(),
+            risk_tier: org_context
+                .metadata
+                .get("risk_tier")
+                .cloned()
+                .unwrap_or_else(|| "balanced".to_string()),
+            route_policy: org_context
+                .metadata
+                .get("route_policy")
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| vec!["policy-guided-routing".to_string()]),
+            quotas: org_context.quotas.clone(),
+            metadata: org_context.metadata.clone(),
+        }
+    }
+
+    async fn inject_governance_context(&self, session_id: &str) -> Result<GovernanceContext> {
+        let org_context = self.inject_organization_context(session_id).await?;
+        Ok(self.governance_from_org_context(&org_context))
+    }
+
+    async fn inject_knowledge_context(&self, session_id: &str) -> Result<KnowledgeContext> {
+        let resolver = KnowledgeContextResolver::new(self.state_store.clone());
+        let injector: &dyn KnowledgeContextInjector = &resolver;
+        injector
+            .inject_knowledge_context(&SessionId::from(session_id))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+    async fn load_workspace_snapshot(&self, session_id: &str) -> Result<AgentWorkspaceSnapshot> {
+        let loader = WorkspaceLoader::new(self.state_store.clone());
+        loader.load(session_id).await
+    }
+
+    async fn persist_dual_context_snapshots(
+        &self,
+        session_id: &str,
+        governance_context: &GovernanceContext,
+        knowledge_context: &KnowledgeContext,
+        workspace_snapshot: &AgentWorkspaceSnapshot,
+    ) -> Result<()> {
+        let compatibility_org_context = OrganizationContext {
+            session_id: governance_context.session_id.clone(),
+            tenant_id: governance_context.tenant_id.clone(),
+            principal_id: governance_context.principal_id.clone(),
+            policy_id: governance_context.policy_id.clone(),
+            role: governance_context.role.clone(),
+            approval_policy: governance_context.approval_policy.clone(),
+            kb_refs: knowledge_context.kb_refs.clone(),
+            plaza_refs: knowledge_context.plaza_refs.clone(),
+            quotas: governance_context.quotas.clone(),
+            metadata: governance_context.metadata.clone(),
+        };
+
+        self.state_store
+            .upsert_knowledge(
+                format!("org-context:{session_id}:latest"),
+                serde_json::to_string(&compatibility_org_context)?,
+                "orchestration:org-context".to_string(),
+            )
+            .await?;
+        self.state_store
+            .upsert_knowledge(
+                format!("governance-context:{session_id}:latest"),
+                serde_json::to_string(governance_context)?,
+                "orchestration:governance-context".to_string(),
+            )
+            .await?;
+        self.state_store
+            .upsert_knowledge(
+                format!("knowledge-context:{session_id}:latest"),
+                serde_json::to_string(knowledge_context)?,
+                "orchestration:knowledge-context".to_string(),
+            )
+            .await?;
+        self.state_store
+            .upsert_knowledge(
+                format!("workspace-context:{session_id}:latest"),
+                serde_json::to_string(workspace_snapshot)?,
+                "orchestration:workspace-loader".to_string(),
+            )
+            .await?;
+        Ok(())
+    }
+    async fn build_focus_board(
+        &self,
+        session_id: &str,
+        brief: &RequirementBrief,
+    ) -> Result<FocusBoard> {
+        let builder = FocusBoardBuilder::new();
+        Ok(builder.build(session_id, brief))
+    }
+
+    async fn register_focus_triggers(
+        &self,
+        session_id: &str,
+        board: &FocusBoard,
+    ) -> Result<Vec<TriggerRef>> {
+        let runtime = TriggerRuntimeEngine::new(self.state_store.clone());
+        runtime
+            .register_focus_triggers(session_id, board, "orchestrator")
+            .await
+    }
+
+    async fn persist_focus_runtime_snapshots(
+        &self,
+        session_id: &str,
+        board: &FocusBoard,
+        trigger_refs: &[TriggerRef],
+    ) -> Result<()> {
+        self.state_store
+            .upsert_knowledge(
+                format!("focus-board:{session_id}:latest"),
+                serde_json::to_string(board)?,
+                "orchestration:focus-board".to_string(),
+            )
+            .await?;
+        self.state_store
+            .upsert_knowledge(
+                format!("trigger-runtime:{session_id}:latest"),
+                serde_json::to_string(trigger_refs)?,
+                "runtime:trigger-runtime".to_string(),
+            )
+            .await?;
+        Ok(())
+    }
     async fn requirement_agent_dialogue(
         &self,
         session_id: &str,
         request: &str,
     ) -> Result<RequirementBrief> {
         self.sessions.append_user_message(session_id, request).await;
+        let governance_context = self.inject_governance_context(session_id).await?;
+        let knowledge_context = self.inject_knowledge_context(session_id).await?;
+        let workspace_snapshot = self.load_workspace_snapshot(session_id).await?;
+        self.persist_dual_context_snapshots(
+            session_id,
+            &governance_context,
+            &knowledge_context,
+            &workspace_snapshot,
+        )
+        .await?;
 
         let open_questions = infer_open_questions(request);
         let clarification_turns = open_questions
@@ -348,6 +614,9 @@ impl OrchestrationKernel {
                 content: serde_json::json!({
                     "request": request,
                     "clarification_turns": clarification_turns,
+                    "governance_context": governance_context,
+                    "knowledge_context": knowledge_context,
+                    "workspace_snapshot": workspace_snapshot,
                 })
                 .to_string(),
             },
@@ -362,7 +631,7 @@ impl OrchestrationKernel {
         let reply = self
             .runtime
             .execute(
-                &self.spacetimedb,
+                &self.state_store,
                 &self.tools,
                 &self.providers,
                 session_id,
@@ -444,7 +713,7 @@ impl OrchestrationKernel {
         let planner_notes = self
             .runtime
             .execute(
-                &self.spacetimedb,
+                &self.state_store,
                 &self.tools,
                 &self.providers,
                 session_id,
@@ -459,7 +728,12 @@ impl OrchestrationKernel {
                 tool_calls: Vec::new(),
             })
             .content
-            .unwrap_or_else(|| format!("Planner sequences {} tasks in two bounded rounds.", tasks.len()));
+            .unwrap_or_else(|| {
+                format!(
+                    "Planner sequences {} tasks in two bounded rounds.",
+                    tasks.len()
+                )
+            });
 
         let critic_prompt = vec![
             ChatMessage {
@@ -495,7 +769,7 @@ impl OrchestrationKernel {
         let critic_notes = self
             .runtime
             .execute(
-                &self.spacetimedb,
+                &self.state_store,
                 &self.tools,
                 &self.providers,
                 session_id,
@@ -544,7 +818,7 @@ impl OrchestrationKernel {
         let planner_rebuttal = self
             .runtime
             .execute(
-                &self.spacetimedb,
+                &self.state_store,
                 &self.tools,
                 &self.providers,
                 session_id,
@@ -604,7 +878,7 @@ impl OrchestrationKernel {
         let judge_notes = self
             .runtime
             .execute(
-                &self.spacetimedb,
+                &self.state_store,
                 &self.tools,
                 &self.providers,
                 session_id,
@@ -621,7 +895,8 @@ impl OrchestrationKernel {
             .content
             .unwrap_or_else(|| "Judge keeps the planner skeleton, accepts critic safeguards, and freezes a verifier-gated execution order.".into());
 
-        let consensus_signals = build_consensus_signals(routing, &verifier_signal_summary, &ops_signal_summary);
+        let consensus_signals =
+            build_consensus_signals(routing, &verifier_signal_summary, &ops_signal_summary);
         let rounds = vec![
             DebateRound {
                 round_index: 1,
@@ -650,7 +925,10 @@ impl OrchestrationKernel {
                 summary: compress_text(&planner_rebuttal, 240),
                 supporting_signals: vec![
                     format!("reputation={reputation_summary}"),
-                    format!("execution_metrics={}", summarize_execution_metrics(&routing.execution_metrics)),
+                    format!(
+                        "execution_metrics={}",
+                        summarize_execution_metrics(&routing.execution_metrics)
+                    ),
                 ],
             },
             DebateRound {
@@ -681,23 +959,30 @@ impl OrchestrationKernel {
         })
     }
 
-    async fn load_routing_context(&self, session_id: &str, request: &str) -> Result<RoutingContext> {
+    async fn load_routing_context(
+        &self,
+        session_id: &str,
+        request: &str,
+    ) -> Result<RoutingContext> {
         let history_prefix = format!("conversation:{session_id}:");
-        let mut history_records = self.spacetimedb.list_knowledge_by_prefix(&history_prefix).await?;
+        let mut history_records = self
+            .state_store
+            .list_knowledge_by_prefix(&history_prefix)
+            .await?;
         history_records.extend(
-            self.spacetimedb
+            self.state_store
                 .list_knowledge_by_prefix(&format!("research:{session_id}:"))
                 .await?,
         );
         let execution_metrics = self
-            .spacetimedb
+            .state_store
             .list_knowledge_by_prefix("metrics:execution:")
             .await?
             .into_iter()
             .filter_map(|record| serde_json::from_str::<ExecutionStats>(&record.value).ok())
             .collect::<Vec<_>>();
         let pending_event_count = self
-            .spacetimedb
+            .state_store
             .list_schedule_events(session_id)
             .await?
             .into_iter()
@@ -705,16 +990,17 @@ impl OrchestrationKernel {
             .count();
 
         let graph_signals = self
-            .spacetimedb
+            .state_store
             .get_knowledge(&format!("graph:{session_id}:snapshot"))
             .await?
             .map(|record| self.rag.graph_routing_signals(&record.value))
             .unwrap_or_default();
 
-        let route_biases = infer_route_biases(&history_records, &graph_signals, pending_event_count);
+        let route_biases =
+            infer_route_biases(&history_records, &graph_signals, pending_event_count);
         let learning_evidence = self
             .memory
-            .retrieve_learning_evidence(&self.spacetimedb, session_id, request, 4)
+            .retrieve_learning_evidence(&self.state_store, session_id, request, 4)
             .await
             .unwrap_or_default();
         let forged_tool_coverage = learning_evidence
@@ -722,50 +1008,70 @@ impl OrchestrationKernel {
             .filter(|item| item.document.asset_kind == LearningAssetKind::ForgedToolManifest)
             .count();
         let skill_success_rate = aggregate_skill_success_rate(
-            &self.spacetimedb
+            &self
+                .state_store
                 .list_skill_library_records(session_id)
                 .await
                 .unwrap_or_default(),
         );
         let causal_confidence = aggregate_causal_confidence(
-            &self.spacetimedb
+            &self
+                .state_store
                 .list_causal_edge_records(session_id)
                 .await
                 .unwrap_or_default(),
         );
         let session_ab_stats = self
-            .spacetimedb
+            .state_store
             .get_knowledge(&format!("metrics:ab:session:{session_id}"))
             .await?
             .and_then(|record| serde_json::from_str::<AbRoutingStats>(&record.value).ok());
         let task_ab_stats = self
-            .spacetimedb
+            .state_store
             .list_knowledge_by_prefix("metrics:ab:task:")
             .await?
             .into_iter()
             .filter_map(|record| {
                 let stats = serde_json::from_str::<AbRoutingStats>(&record.value).ok()?;
-                Some((record.key.trim_start_matches("metrics:ab:task:").to_string(), stats))
+                Some((
+                    record
+                        .key
+                        .trim_start_matches("metrics:ab:task:")
+                        .to_string(),
+                    stats,
+                ))
             })
             .collect::<HashMap<_, _>>();
         let tool_ab_stats = self
-            .spacetimedb
+            .state_store
             .list_knowledge_by_prefix("metrics:ab:tool:")
             .await?
             .into_iter()
             .filter_map(|record| {
                 let stats = serde_json::from_str::<AbRoutingStats>(&record.value).ok()?;
-                Some((record.key.trim_start_matches("metrics:ab:tool:").to_string(), stats))
+                Some((
+                    record
+                        .key
+                        .trim_start_matches("metrics:ab:tool:")
+                        .to_string(),
+                    stats,
+                ))
             })
             .collect::<HashMap<_, _>>();
         let server_ab_stats = self
-            .spacetimedb
+            .state_store
             .list_knowledge_by_prefix("metrics:ab:server:")
             .await?
             .into_iter()
             .filter_map(|record| {
                 let stats = serde_json::from_str::<AbRoutingStats>(&record.value).ok()?;
-                Some((record.key.trim_start_matches("metrics:ab:server:").to_string(), stats))
+                Some((
+                    record
+                        .key
+                        .trim_start_matches("metrics:ab:server:")
+                        .to_string(),
+                    stats,
+                ))
             })
             .collect::<HashMap<_, _>>();
         let agent_reputations = aggregate_agent_reputations(&history_records);
@@ -818,7 +1124,7 @@ impl OrchestrationKernel {
         let reply = self
             .runtime
             .execute(
-                &self.spacetimedb,
+                &self.state_store,
                 &self.tools,
                 &self.providers,
                 session_id,
@@ -921,7 +1227,11 @@ impl OrchestrationKernel {
         )
     }
 
-    fn adaptive_task_pack(&self, objective: &str, routing: &RoutingContext) -> AgentEvolverTaskPack {
+    fn adaptive_task_pack(
+        &self,
+        objective: &str,
+        routing: &RoutingContext,
+    ) -> AgentEvolverTaskPack {
         let evolution_summary = routing
             .history_records
             .iter()
@@ -968,13 +1278,15 @@ impl OrchestrationKernel {
             agent_name: "architecture-agent".into(),
             role: "Architecture".into(),
             objective: format!(
-                "Design a Rust + SpacetimeDB workflow for: {}. Optimization hypothesis: {}. Learned constraints: {}",
+                "Design a Rust + StateStore workflow for: {}. Optimization hypothesis: {}. Learned constraints: {}",
                 brief.clarified_goal, optimization_proposal.hypothesis, skill_constraints
             ),
             depends_on: Vec::new(),
         }];
 
-        if routing.graph_signals.needs_more_extraction || request_needs_graph_focus(&brief.original_request) {
+        if routing.graph_signals.needs_more_extraction
+            || request_needs_graph_focus(&brief.original_request)
+        {
             tasks.push(SwarmTask {
                 task_id: "knowledge".into(),
                 agent_name: "knowledge-agent".into(),
@@ -1016,7 +1328,8 @@ impl OrchestrationKernel {
             });
         }
 
-        if routing.pending_event_count > 0 || ceo_summary.to_ascii_lowercase().contains("iteration") {
+        if routing.pending_event_count > 0 || ceo_summary.to_ascii_lowercase().contains("iteration")
+        {
             tasks.push(SwarmTask {
                 task_id: "operations".into(),
                 agent_name: "ops-agent".into(),
@@ -1031,13 +1344,18 @@ impl OrchestrationKernel {
 
         if ceo_summary.to_ascii_lowercase().contains("security")
             || history_contains_security_risk(&routing.history_records)
-            || brief.original_request.to_ascii_lowercase().contains("permission")
+            || brief
+                .original_request
+                .to_ascii_lowercase()
+                .contains("permission")
         {
             tasks.push(SwarmTask {
                 task_id: "security".into(),
                 agent_name: "security-agent".into(),
                 role: "Security".into(),
-                objective: "Review permissions, prompt safety, and execution boundaries before rollout.".into(),
+                objective:
+                    "Review permissions, prompt safety, and execution boundaries before rollout."
+                        .into(),
                 depends_on: vec!["architecture".into()],
             });
         }
@@ -1055,6 +1373,261 @@ impl OrchestrationKernel {
         tasks
     }
 
+    async fn admit_capability_for_task(
+        &self,
+        session_id: &str,
+        task: &SwarmTask,
+        decision: &ToolRoutingDecision,
+        identity: &ExecutionIdentity,
+    ) -> Result<(Option<String>, Option<String>, String)> {
+        let Some(tool_name) = decision.tool_name.as_deref() else {
+            return Ok((None, None, "not_applicable".to_string()));
+        };
+
+        let engine = CapabilityAdmissionEngine::with_policy_mode(self.runtime.policy_mode());
+        let selector = CapabilityIntentSelector::new(self.tools.clone());
+        let selector_port: &dyn CapabilityIntentSelectorPort = &selector;
+        let intent = CapabilityIntent {
+            session_id: session_id.to_string(),
+            objective: task.objective.clone(),
+            required_tags: vec![task.role.clone()],
+            preferred_servers: decision.mcp_server.clone().into_iter().collect::<Vec<_>>(),
+        };
+        self.record_foundry_router_shadow(session_id, task, &intent, decision)
+            .await?;
+        let candidates = selector_port
+            .select_candidates(&intent)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let selector_allows_tool = candidates.iter().any(|candidate| candidate.tool == tool_name);
+        let artifact_write_override = tool_name == "write_file"
+            && objective_requires_local_artifact_write(&task.objective)
+            && self.tools.has_tool("write_file");
+        if !selector_allows_tool && !artifact_write_override {
+            return Ok((
+                Some("tool not selected by capability intent selector".to_string()),
+                None,
+                "rejected".to_string(),
+            ));
+        }
+        let preferred_server = candidates
+            .iter()
+            .find(|candidate| candidate.tool == tool_name)
+            .and_then(|candidate| candidate.server.clone());
+
+        let provider_factory_artifacts = self.providers.factory_artifacts();
+        let admission = engine
+            .admit_selected(
+                &self.state_store,
+                &self.tools,
+                &provider_factory_artifacts,
+                session_id,
+                &task.task_id,
+                identity,
+                &intent,
+                tool_name,
+                preferred_server
+                    .as_deref()
+                    .or(decision.mcp_server.as_deref()),
+            )
+            .await?;
+
+        if admission.allowed {
+            if let Some(blocked) = self
+                .enforce_admission_governance(session_id, task, identity, tool_name)
+                .await?
+            {
+                return Ok((
+                    Some(blocked.reason),
+                    Some(blocked.evidence_ref),
+                    "rejected".to_string(),
+                ));
+            }
+            Ok((None, admission.evidence_ref, "admitted".to_string()))
+        } else {
+            Ok((
+                Some(admission.reason),
+                admission.evidence_ref,
+                "rejected".to_string(),
+            ))
+        }
+    }
+    fn foundry_router_shadow_enabled(&self) -> bool {
+        let raw = std::env::var("AUTOLOOP_FOUNDRY_ROUTER_ENABLED")
+            .unwrap_or_else(|_| "enabled".to_string())
+            .to_ascii_lowercase();
+        !matches!(raw.as_str(), "disabled" | "off" | "false" | "0")
+    }
+
+    async fn record_foundry_router_shadow(
+        &self,
+        session_id: &str,
+        task: &SwarmTask,
+        intent: &CapabilityIntent,
+        decision: &ToolRoutingDecision,
+    ) -> Result<()> {
+        if !self.foundry_router_shadow_enabled() {
+            return Ok(());
+        }
+        let now_ms = current_time_ms();
+        let intake = normalize_intake(crate::contracts::skill_foundry::FoundryIntake {
+            intake_id: format!("intake:foundry-shadow:{}:{}", task.task_id, now_ms),
+            task_name: format!("{}:{}", task.role, task.task_id),
+            concrete_examples: vec![task.objective.clone()],
+            negative_examples: vec![],
+            expected_output: "capability-routing-suggestion".to_string(),
+            existing_software: vec![decision
+                .tool_name
+                .clone()
+                .unwrap_or_else(|| "tool:none".to_string())],
+            existing_apis: vec![],
+            existing_scripts: vec![],
+            requested_by: "orchestrator-shadow".to_string(),
+            session_id: session_id.to_string(),
+            created_at_ms: now_ms,
+        });
+        let extraction = extract_first_principles(&intake);
+        let route = route_layer(&extraction, now_ms);
+        let suggestion = promotion_suggestion(&extraction, &route, now_ms);
+        let key = format!("foundry-router:shadow:{session_id}:{}:latest", task.task_id);
+        let payload = serde_json::json!({
+            "session_id": session_id,
+            "task_id": task.task_id,
+            "shadow": true,
+            "feature_flag": "AUTOLOOP_FOUNDRY_ROUTER_ENABLED",
+            "intent": intent,
+            "current_tool_decision": {
+                "tool_name": decision.tool_name,
+                "mcp_server": decision.mcp_server,
+                "route_variant": decision.route_variant,
+            },
+            "foundry": {
+                "route": route,
+                "suggestion": suggestion,
+            },
+            "created_at_ms": now_ms,
+        });
+        self.state_store
+            .upsert_json_knowledge(key, &payload, "foundry-router-shadow")
+            .await?;
+        Ok(())
+    }
+
+
+    fn governance_repo_root(&self) -> std::path::PathBuf {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("D:\\AutoLoop\\autoloop-app"))
+    }
+
+    fn governance_action_and_sensitivity(&self, tool_name: &str) -> (&'static str, &'static str) {
+        let risk = self
+            .tools
+            .manifests()
+            .into_iter()
+            .find(|manifest| manifest.registered_tool_name == tool_name)
+            .map(|manifest| manifest.risk)
+            .unwrap_or(CapabilityRisk::Medium);
+        match risk {
+            CapabilityRisk::Low => ("read", "low"),
+            CapabilityRisk::Medium => ("read", "medium"),
+            CapabilityRisk::High => ("write", "high"),
+        }
+    }
+
+    async fn enforce_admission_governance(
+        &self,
+        session_id: &str,
+        task: &SwarmTask,
+        identity: &ExecutionIdentity,
+        tool_name: &str,
+    ) -> Result<Option<GovernanceBlockSummary>> {
+        let (action, sensitivity) = self.governance_action_and_sensitivity(tool_name);
+        let trace_id = format!(
+            "trace:{session_id}:{}:governance-admission:{}",
+            task.task_id,
+            current_time_ms()
+        );
+        let governance = GitmemoryCoreKernel::new()
+            .run_phase4_advanced_governance(
+                &self.state_store,
+                &self.governance_repo_root(),
+                session_id,
+                &identity.tenant_id,
+                &trace_id,
+                GovernancePhase::Admission,
+                &identity.principal_id,
+                action,
+                "memory:runtime",
+                sensitivity,
+            )
+            .await?;
+
+        if governance.allowed {
+            return Ok(None);
+        }
+
+        let block_rule_id = governance
+            .rule_id
+            .clone()
+            .unwrap_or_else(|| "governance:unknown".to_string());
+        let evidence_ref = self
+            .runtime
+            .tag_external_stage(
+                &self.state_store,
+                session_id,
+                &trace_id,
+                Some(&task.task_id),
+                Some(tool_name),
+                crate::runtime::evidence_tagger::EvidenceTagStage::Admission,
+                "governance.admission.blocked",
+                serde_json::json!({
+                    "rule_id": block_rule_id,
+                    "policy_version": governance.policy_version,
+                    "replay_fp": governance.replay_fp,
+                    "summary": governance.summary,
+                    "source": "phase4-advanced-governance",
+                }),
+            )
+            .await?;
+
+        let reason = serde_json::json!({
+            "code": "governance_admission_blocked",
+            "rule_id": governance.rule_id,
+            "policy_version": governance.policy_version,
+            "evidence_ref": evidence_ref,
+            "replay_fp": governance.replay_fp,
+            "summary": governance.summary,
+        });
+        self.state_store
+            .upsert_json_knowledge(
+                format!(
+                    "policy-reject:{session_id}:{}:{}",
+                    task.task_id,
+                    current_time_ms()
+                ),
+                &serde_json::json!({
+                    "session_id": session_id,
+                    "task_id": task.task_id,
+                    "trace_id": trace_id,
+                    "tenant_id": identity.tenant_id,
+                    "principal_id": identity.principal_id,
+                    "policy_id": identity.policy_id,
+                    "tool_name": tool_name,
+                    "rule_id": governance.rule_id,
+                    "policy_version": governance.policy_version,
+                    "evidence_ref": evidence_ref,
+                    "replay_fp": governance.replay_fp,
+                    "summary": governance.summary,
+                }),
+                "phase4-governance",
+            )
+            .await?;
+
+        Ok(Some(GovernanceBlockSummary {
+            reason: reason.to_string(),
+            evidence_ref,
+        }))
+    }
     async fn execute_swarm(
         &self,
         session_id: &str,
@@ -1070,9 +1643,10 @@ impl OrchestrationKernel {
         let pool_lookup = pool_queues
             .iter()
             .flat_map(|queue| {
-                queue.tasks.iter().map(|task| {
-                    (task.task_id.clone(), queue.pool.clone())
-                })
+                queue
+                    .tasks
+                    .iter()
+                    .map(|task| (task.task_id.clone(), queue.pool.clone()))
             })
             .collect::<HashMap<_, _>>();
         if ordered_tasks.len() > self.runtime.limits.max_parallel_agents.saturating_mul(4) {
@@ -1085,7 +1659,7 @@ impl OrchestrationKernel {
             let _ = self
                 .runtime
                 .apply_degrade_profile(
-                    &self.spacetimedb,
+                    &self.state_store,
                     session_id,
                     &trigger,
                     DegradeProfileKind::QueueThrottle,
@@ -1095,7 +1669,7 @@ impl OrchestrationKernel {
             let _ = self
                 .runtime
                 .build_recovery_plan(
-                    &self.spacetimedb,
+                    &self.state_store,
                     session_id,
                     &trigger,
                     DegradeProfileKind::QueueThrottle,
@@ -1103,7 +1677,7 @@ impl OrchestrationKernel {
                 .await;
         }
         let _ = self
-            .spacetimedb
+            .state_store
             .upsert_json_knowledge(
                 format!("execution-pools:{session_id}:{}", current_time_ms()),
                 &pool_queues,
@@ -1117,9 +1691,30 @@ impl OrchestrationKernel {
                 .cloned()
                 .unwrap_or(ExecutionPoolKind::Stable);
             let decision = self.select_tool(session_id, task, routing);
-            let tool_used = decision.tool_name.clone();
-            let invocation_payload = decision.invocation_payload.clone();
+            let mut tool_used = decision.tool_name.clone();
+            let mut selected_server = decision.mcp_server.clone();
+            let mut invocation_payload = decision.invocation_payload.clone();
             let mut guard_decision = "provider".to_string();
+            let mut guard_reason = "provider fallback path".to_string();
+            let mut admission_status = "not_applicable".to_string();
+            let mut admission_reason: Option<String> = None;
+            let mut admission_evidence_ref: Option<String> = None;
+
+            if tool_used.is_some() {
+                let (rejected_reason, evidence_ref, status) = self
+                    .admit_capability_for_task(session_id, task, &decision, &execution_identity)
+                    .await?;
+                admission_status = status;
+                admission_evidence_ref = evidence_ref;
+                if let Some(reason) = rejected_reason {
+                    admission_reason = Some(reason.clone());
+                    guard_reason = reason.clone();
+                    guard_decision = format!("capability_rejected:{reason}");
+                    tool_used = None;
+                    selected_server = None;
+                    invocation_payload = None;
+                }
+            }
             let manifest_for_tool = tool_used.as_deref().and_then(|tool_name| {
                 self.tools
                     .manifests()
@@ -1134,18 +1729,21 @@ impl OrchestrationKernel {
                     session_id: SessionId::from(session_id),
                     trace_id: TraceId::from(format!(
                         "{}:{}:{}",
-                        session_id, task.task_id, current_time_ms()
+                        session_id,
+                        task.task_id,
+                        current_time_ms()
                     )),
                     task_id: TaskId::from(task.task_id.as_str()),
                     capability_id: CapabilityId::from(tool_name.as_str()),
                     identity: execution_identity.clone(),
                     payload: serde_json::Value::String(arguments.to_string()),
                     constraints: self.default_task_constraints(),
+                    trust_plan: None,
                 };
                 let executed = self
                     .runtime
                     .execute(
-                        &self.spacetimedb,
+                        &self.state_store,
                         &self.tools,
                         &self.providers,
                         session_id,
@@ -1155,62 +1753,140 @@ impl OrchestrationKernel {
                     )
                     .await?;
                 guard_decision = format!("{:?}", executed.guard_report.decision);
+                guard_reason = executed.guard_report.reason.clone();
                 format!(
                     "{}\n[routing] {}\n[guard] {}\n[pool] {:?}",
-                    executed.content,
-                    decision.rationale,
-                    executed.guard_report.reason,
-                    pool_kind
+                    executed.content, decision.rationale, executed.guard_report.reason, pool_kind
                 )
             } else {
-                let overlay = self.adaptive_overlay(&task.objective, routing);
-                let task_pack = self.adaptive_task_pack(&task.objective, routing);
-                let provider_messages = [
-                    ChatMessage {
-                        role: "system".into(),
-                        content: format!(
-                            "You are {}.\n\n{}\n\n{}",
-                            task.agent_name,
-                            overlay_as_text(&overlay),
-                            task_pack_as_text(&task_pack)
-                        ),
-                    },
-                    ChatMessage {
-                        role: "user".into(),
-                        content: format!("Goal: {}\nTask: {}", brief.clarified_goal, task.objective),
-                    },
-                ];
-                let envelope = self.provider_envelope(
-                    session_id,
-                    &format!("provider-task:{}", task.task_id),
-                    execution_identity.clone(),
-                    &provider_messages,
-                    self.default_provider_constraints(),
-                );
-                let reply = self
-                    .runtime
-                    .execute(
-                        &self.spacetimedb,
-                        &self.tools,
-                        &self.providers,
+                let delegated = if task.role == "Execution" {
+                    if let Some(peer) = self.select_peer_for_delegation(session_id).await? {
+                        selected_server = Some(format!("peer::{peer}"));
+                        guard_decision = "Delegated".into();
+                        guard_reason = format!("peer delegation to {peer}");
+                        let delegate_messages = [
+                            ChatMessage {
+                                role: "system".into(),
+                                content: format!(
+                                    "You are peer delegate {}. Execute the delegated task with bounded reasoning and return actionable output.",
+                                    peer
+                                ),
+                            },
+                            ChatMessage {
+                                role: "user".into(),
+                                content: format!(
+                                    "Goal: {}\nDelegated Task: {}",
+                                    brief.clarified_goal, task.objective
+                                ),
+                            },
+                        ];
+                        let delegate_envelope = self.provider_envelope(
+                            session_id,
+                            &format!("peer-delegate:{}", task.task_id),
+                            execution_identity.clone(),
+                            &delegate_messages,
+                            self.default_provider_constraints(),
+                        );
+                        let reply = self
+                            .runtime
+                            .execute(
+                                &self.state_store,
+                                &self.tools,
+                                &self.providers,
+                                session_id,
+                                &delegate_envelope,
+                                None,
+                                None,
+                            )
+                            .await?
+                            .provider_response
+                            .unwrap_or(crate::providers::LlmResponse {
+                                content: None,
+                                tool_calls: Vec::new(),
+                            });
+                        let delegated_output = reply
+                            .content
+                            .unwrap_or_else(|| format!("peer {} completed delegated task.", peer));
+                        let _ = self
+                            .state_store
+                            .upsert_json_knowledge(
+                                format!("peer-delegation:{session_id}:{}:latest", task.task_id),
+                                &serde_json::json!({
+                                    "session_id": session_id,
+                                    "task_id": task.task_id,
+                                    "peer": peer,
+                                    "delegated": true,
+                                    "created_at_ms": current_time_ms(),
+                                }),
+                                "orchestration",
+                            )
+                            .await;
+                        Some(format!(
+                            "{}\n[delegation] peer={}\n[pool] {:?}",
+                            delegated_output, peer, pool_kind
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(peer_output) = delegated {
+                    peer_output
+                } else {
+                    let overlay = self.adaptive_overlay(&task.objective, routing);
+                    let task_pack = self.adaptive_task_pack(&task.objective, routing);
+                    let provider_messages = [
+                        ChatMessage {
+                            role: "system".into(),
+                            content: format!(
+                                "You are {}.\n\n{}\n\n{}",
+                                task.agent_name,
+                                overlay_as_text(&overlay),
+                                task_pack_as_text(&task_pack)
+                            ),
+                        },
+                        ChatMessage {
+                            role: "user".into(),
+                            content: format!(
+                                "Goal: {}\nTask: {}",
+                                brief.clarified_goal, task.objective
+                            ),
+                        },
+                    ];
+                    let envelope = self.provider_envelope(
                         session_id,
-                        &envelope,
-                        None,
-                        overlay.preferred_model.as_deref(),
+                        &format!("provider-task:{}", task.task_id),
+                        execution_identity.clone(),
+                        &provider_messages,
+                        self.default_provider_constraints(),
+                    );
+                    let reply = self
+                        .runtime
+                        .execute(
+                            &self.state_store,
+                            &self.tools,
+                            &self.providers,
+                            session_id,
+                            &envelope,
+                            None,
+                            overlay.preferred_model.as_deref(),
+                        )
+                        .await?
+                        .provider_response
+                        .unwrap_or(crate::providers::LlmResponse {
+                            content: None,
+                            tool_calls: Vec::new(),
+                        });
+                    format!(
+                        "{}\n[pool] {:?}",
+                        reply
+                            .content
+                            .unwrap_or_else(|| format!("{} completed.", task.agent_name)),
+                        pool_kind
                     )
-                    .await?
-                    .provider_response
-                    .unwrap_or(crate::providers::LlmResponse {
-                        content: None,
-                        tool_calls: Vec::new(),
-                    });
-                format!(
-                    "{}\n[pool] {:?}",
-                    reply
-                        .content
-                        .unwrap_or_else(|| format!("{} completed.", task.agent_name)),
-                    pool_kind
-                )
+                }
             };
 
             self.sessions
@@ -1222,18 +1898,45 @@ impl OrchestrationKernel {
                 task: task.clone(),
                 output,
                 tool_used,
-                mcp_server: decision.mcp_server,
+                mcp_server: selected_server,
                 invocation_payload,
                 outcome_score,
                 route_variant: decision.route_variant,
                 control_score: decision.control_score,
                 treatment_score: decision.treatment_score,
-                guard_decision,
+                guard_decision: guard_decision.clone(),
             });
             if let Some(report) = reports.last() {
                 self.runtime
-                    .record_execution_outcome(&self.spacetimedb, report)
+                    .record_execution_outcome(&self.state_store, report)
                     .await?;
+
+                let pool_name = match pool_kind {
+                    ExecutionPoolKind::Stable => "stable",
+                    ExecutionPoolKind::Adaptive => "adaptive",
+                };
+                let trace = ExecutionFabricTrace {
+                    session_id: session_id.to_string(),
+                    task_id: task.task_id.clone(),
+                    trace_id: format!(
+                        "fabric:{}:{}:{}",
+                        session_id,
+                        task.task_id,
+                        current_time_ms()
+                    ),
+                    pool: pool_name.to_string(),
+                    route_variant: report.route_variant.clone(),
+                    tool_name: report.tool_used.clone(),
+                    mcp_server: report.mcp_server.clone(),
+                    admission_status: admission_status.clone(),
+                    admission_reason: admission_reason.clone(),
+                    admission_evidence_ref: admission_evidence_ref.clone(),
+                    guard_decision: guard_decision.clone(),
+                    guard_reason: guard_reason.clone(),
+                    outcome_score: report.outcome_score,
+                    created_at_ms: current_time_ms(),
+                };
+                let _ = persist_execution_fabric_trace(&self.state_store, &trace).await;
             }
         }
 
@@ -1335,6 +2038,21 @@ impl OrchestrationKernel {
         })
     }
 
+    async fn select_peer_for_delegation(&self, session_id: &str) -> Result<Option<String>> {
+        let key = format!("workspace-context:{session_id}:latest");
+        let Some(record) = self.state_store.get_knowledge(&key).await? else {
+            return Ok(None);
+        };
+        let snapshot: AgentWorkspaceSnapshot = match serde_json::from_str(&record.value) {
+            Ok(item) => item,
+            Err(_) => return Ok(None),
+        };
+        Ok(snapshot
+            .peers
+            .into_iter()
+            .find(|peer| !peer.trim().is_empty()))
+    }
+
     fn provider_envelope(
         &self,
         session_id: &str,
@@ -1351,6 +2069,7 @@ impl OrchestrationKernel {
             identity,
             payload: serde_json::to_value(messages).unwrap_or_else(|_| serde_json::json!([])),
             constraints,
+            trust_plan: None,
         }
     }
 
@@ -1370,7 +2089,11 @@ impl OrchestrationKernel {
         let missing_criteria = brief
             .acceptance_criteria
             .iter()
-            .filter(|criterion| !combined.to_ascii_lowercase().contains(&criterion.to_ascii_lowercase()))
+            .filter(|criterion| {
+                !combined
+                    .to_ascii_lowercase()
+                    .contains(&criterion.to_ascii_lowercase())
+            })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -1380,7 +2103,9 @@ impl OrchestrationKernel {
         {
             return ValidationReport {
                 ready: true,
-                summary: "All acceptance criteria have matching evidence in the swarm execution outputs.".into(),
+                summary:
+                    "All acceptance criteria have matching evidence in the swarm execution outputs."
+                        .into(),
                 follow_up_tasks: Vec::new(),
                 verifier_summary: verifier_report.summary.clone(),
             };
@@ -1423,7 +2148,9 @@ impl OrchestrationKernel {
                     .recommended_actions
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "Re-run verifier checks and resolve catalog/regression issues.".into()),
+                    .unwrap_or_else(|| {
+                        "Re-run verifier checks and resolve catalog/regression issues.".into()
+                    }),
                 depends_on: vec!["execution".into()],
             });
         }
@@ -1443,7 +2170,12 @@ impl OrchestrationKernel {
         }
     }
 
-    fn select_tool(&self, session_id: &str, task: &SwarmTask, routing: &RoutingContext) -> ToolRoutingDecision {
+    fn select_tool(
+        &self,
+        session_id: &str,
+        task: &SwarmTask,
+        routing: &RoutingContext,
+    ) -> ToolRoutingDecision {
         if task.role == "GraphRAG" && self.tools.has_tool("write_file") {
             let overlay = self.adaptive_overlay(&task.objective, routing);
             return ToolRoutingDecision {
@@ -1454,7 +2186,9 @@ impl OrchestrationKernel {
                 control_score: 100,
                 treatment_score: 100,
                 route_variant: "fixed".into(),
-                rationale: "GraphRAG tasks prefer deterministic local persistence for extracted artifacts.".into(),
+                rationale:
+                    "GraphRAG tasks prefer deterministic local persistence for extracted artifacts."
+                        .into(),
             };
         }
 
@@ -1471,7 +2205,9 @@ impl OrchestrationKernel {
                 control_score: 120,
                 treatment_score: 120,
                 route_variant: "fixed".into(),
-                rationale: "cli-agent is dedicated to maintaining the forged MCP capability catalog.".into(),
+                rationale:
+                    "cli-agent is dedicated to maintaining the forged MCP capability catalog."
+                        .into(),
             };
         }
 
@@ -1502,11 +2238,17 @@ impl OrchestrationKernel {
         let catalog_is_empty = catalog_tools.is_empty();
 
         for tool_name in self.tools.names() {
+            let artifact_objective = objective_requires_local_artifact_write(&task.objective);
             if task.role == "Execution"
                 && tool_name != "cli::forge_mcp_tool"
-                && !catalog_tools.iter().any(|catalog_name| catalog_name == &tool_name)
+                && !catalog_tools
+                    .iter()
+                    .any(|catalog_name| catalog_name == &tool_name)
             {
-                continue;
+                let artifact_local_write_fallback = tool_name == "write_file" && artifact_objective;
+                if !artifact_local_write_fallback {
+                    continue;
+                }
             }
             let mut control_score = 0i32;
             let mut reasons = Vec::new();
@@ -1514,18 +2256,37 @@ impl OrchestrationKernel {
 
             if tool_name == "cli::forge_mcp_tool" {
                 control_score += 5;
-                reasons.push("CLI-Anything style forge tool can synthesize reusable MCP wrappers".to_string());
+                reasons.push(
+                    "CLI-Anything style forge tool can synthesize reusable MCP wrappers"
+                        .to_string(),
+                );
+                if artifact_objective {
+                    control_score -= 25;
+                    reasons.push(
+                        "artifact objective prefers deterministic local write_file over forge path"
+                            .to_string(),
+                    );
+                }
                 if task.role == "Execution" && !catalog_is_empty {
                     control_score -= 20;
-                    reasons.push("execution-agent must prefer catalog tools before forging new capability".to_string());
+                    reasons.push(
+                        "execution-agent must prefer catalog tools before forging new capability"
+                            .to_string(),
+                    );
                 }
                 if request_needs_cli_tooling(&task.objective) || catalog_is_empty {
                     control_score += 10;
-                    reasons.push("task objective explicitly asks for a custom CLI/MCP tool surface".to_string());
+                    reasons.push(
+                        "task objective explicitly asks for a custom CLI/MCP tool surface"
+                            .to_string(),
+                    );
                 }
                 if routing.forged_tool_coverage > 0 && objective_prefers_reuse(&task.objective) {
                     control_score -= 12;
-                    reasons.push("existing forged capability evidence suggests reusing a prior MCP wrapper".to_string());
+                    reasons.push(
+                        "existing forged capability evidence suggests reusing a prior MCP wrapper"
+                            .to_string(),
+                    );
                 }
                 if routing.graph_signals.prefers_cli_execution {
                     control_score += 4;
@@ -1536,21 +2297,37 @@ impl OrchestrationKernel {
                 reasons.push("available MCP endpoint".to_string());
                 if task.role == "Execution" {
                     control_score += 6;
-                    reasons.push("execution-agent is restricted to forged capability catalog tools".to_string());
+                    reasons.push(
+                        "execution-agent is restricted to forged capability catalog tools"
+                            .to_string(),
+                    );
                 }
                 if routing.graph_signals.prefers_mcp_execution {
                     control_score += 5;
                     reasons.push("graph entities point toward MCP/server execution".to_string());
                 }
-                let forged_bonus =
-                    forged_manifest_bonus(&routing.learning_evidence, &tool_name, candidate_server.as_deref());
+                let forged_bonus = forged_manifest_bonus(
+                    &routing.learning_evidence,
+                    &tool_name,
+                    candidate_server.as_deref(),
+                );
                 if forged_bonus > 0 {
                     control_score += forged_bonus;
-                    reasons.push(format!("retrieved forged MCP capability evidence +{forged_bonus}"));
+                    reasons.push(format!(
+                        "retrieved forged MCP capability evidence +{forged_bonus}"
+                    ));
                 }
-            } else if tool_name == "read_file" || tool_name == "write_file" || tool_name == "shell" {
+            } else if tool_name == "read_file" || tool_name == "write_file" || tool_name == "shell"
+            {
                 control_score += 2;
                 reasons.push("local CLI-capable tool".to_string());
+                if tool_name == "write_file" && artifact_objective {
+                    control_score += 35;
+                    reasons.push(
+                        "artifact objective hard-boosts deterministic local write_file path"
+                            .to_string(),
+                    );
+                }
                 if routing.graph_signals.prefers_cli_execution {
                     control_score += 5;
                     reasons.push("graph entities point toward CLI/file execution".to_string());
@@ -1596,7 +2373,8 @@ impl OrchestrationKernel {
                 ));
             }
 
-            if task.objective.to_ascii_lowercase().contains("mcp") && tool_name.starts_with("mcp::") {
+            if task.objective.to_ascii_lowercase().contains("mcp") && tool_name.starts_with("mcp::")
+            {
                 control_score += 4;
                 reasons.push("task objective explicitly mentions MCP".to_string());
             }
@@ -1625,7 +2403,11 @@ impl OrchestrationKernel {
             let use_treatment = in_treatment
                 && (treatment_score as f32)
                     >= (control_score as f32 + self.routing_takeover_threshold);
-            let final_score = if use_treatment { treatment_score } else { control_score };
+            let final_score = if use_treatment {
+                treatment_score
+            } else {
+                control_score
+            };
             let route_variant = if use_treatment {
                 "treatment"
             } else if in_treatment {
@@ -1647,7 +2429,12 @@ impl OrchestrationKernel {
                         &overlay,
                     ))
                 } else if let Some(server) = mcp_server.as_deref() {
-                    Some(build_mcp_payload(task, server, &routing.route_biases, &overlay))
+                    Some(build_mcp_payload(
+                        task,
+                        server,
+                        &routing.route_biases,
+                        &overlay,
+                    ))
                 } else {
                     Some(build_local_payload(task, &tool_name, &overlay))
                 };
@@ -1739,7 +2526,9 @@ fn infer_open_questions(request: &str) -> Vec<String> {
     let mut questions = Vec::new();
     let lowered = request.to_ascii_lowercase();
     if !lowered.contains("mcp") {
-        questions.push("Which MCP servers or custom MCP endpoints should the execution layer prefer?".into());
+        questions.push(
+            "Which MCP servers or custom MCP endpoints should the execution layer prefer?".into(),
+        );
     }
     if !lowered.contains("success") && !lowered.contains("acceptance") {
         questions.push("What exact success criteria should the validation layer enforce?".into());
@@ -1763,7 +2552,10 @@ fn infer_requirement_answer(question: &str, request: &str) -> String {
     } else if question.to_ascii_lowercase().contains("scheduled") {
         "Run requirement/swarm execution synchronously and send retries, learning, and reconciliation into scheduled events.".into()
     } else {
-        format!("Infer a bounded default from request: {}", compress_text(request, 96))
+        format!(
+            "Infer a bounded default from request: {}",
+            compress_text(request, 96)
+        )
     }
 }
 
@@ -1945,7 +2737,9 @@ fn build_consensus_signals(
     signals
 }
 
-fn aggregate_agent_reputations(history_records: &[KnowledgeRecord]) -> HashMap<String, AgentReputation> {
+fn aggregate_agent_reputations(
+    history_records: &[KnowledgeRecord],
+) -> HashMap<String, AgentReputation> {
     let mut buckets = HashMap::<String, Vec<ExecutionReport>>::new();
     for record in history_records {
         if !record.key.ends_with(":swarm") {
@@ -1968,7 +2762,10 @@ fn aggregate_agent_reputations(history_records: &[KnowledgeRecord]) -> HashMap<S
             let average_score = if reports.is_empty() {
                 0.0
             } else {
-                reports.iter().map(|report| report.outcome_score as f32).sum::<f32>()
+                reports
+                    .iter()
+                    .map(|report| report.outcome_score as f32)
+                    .sum::<f32>()
                     / reports.len() as f32
             };
             let verifier_alignment = if reports.is_empty() {
@@ -1976,11 +2773,15 @@ fn aggregate_agent_reputations(history_records: &[KnowledgeRecord]) -> HashMap<S
             } else {
                 reports
                     .iter()
-                    .filter(|report| report.outcome_score > 0 && !report.guard_decision.eq_ignore_ascii_case("blocked"))
+                    .filter(|report| {
+                        report.outcome_score > 0
+                            && !report.guard_decision.eq_ignore_ascii_case("blocked")
+                    })
                     .count() as f32
                     / reports.len() as f32
             };
-            let trust = ((average_score.max(0.0) / 5.0) * 0.6 + verifier_alignment * 0.4).clamp(0.0, 1.0);
+            let trust =
+                ((average_score.max(0.0) / 5.0) * 0.6 + verifier_alignment * 0.4).clamp(0.0, 1.0);
 
             (
                 agent_name.clone(),
@@ -2083,7 +2884,7 @@ fn task_pack_as_text(task_pack: &AgentEvolverTaskPack) -> String {
 }
 
 fn infer_acceptance_criteria(request: &str) -> Vec<String> {
-    let mut criteria = vec!["spacetimedb".into(), "graph".into(), "agent".into()];
+    let mut criteria = vec!["state_store".into(), "graph".into(), "agent".into()];
     let lowered = request.to_ascii_lowercase();
     if lowered.contains("mcp") {
         criteria.push("mcp".into());
@@ -2150,6 +2951,28 @@ fn objective_prefers_reuse(request: &str) -> bool {
         || lowered.contains("existing forged")
 }
 
+fn objective_requires_local_artifact_write(request: &str) -> bool {
+    let lowered = request.to_ascii_lowercase();
+    let mentions_write_action = lowered.contains("write_file")
+        || lowered.contains("write file")
+        || lowered.contains("write to")
+        || lowered.contains("save ")
+        || lowered.contains("persist")
+        || request.contains("写入")
+        || request.contains("落盘")
+        || request.contains("生成文件");
+    let mentions_file_target = lowered.contains(".html")
+        || lowered.contains(".htm")
+        || lowered.contains(".txt")
+        || lowered.contains(".md")
+        || lowered.contains(".json")
+        || lowered.contains("output\\")
+        || lowered.contains("d:\\")
+        || lowered.contains("d:/")
+        || lowered.contains("file");
+    mentions_write_action && mentions_file_target
+}
+
 fn infer_capability_name(task: &SwarmTask) -> String {
     let mut tokens = task
         .objective
@@ -2199,7 +3022,7 @@ fn history_contains_security_risk(history_records: &[KnowledgeRecord]) -> bool {
 }
 
 fn aggregate_skill_success_rate(
-    skills: &[autoloop_spacetimedb_adapter::SkillLibraryRecord],
+    skills: &[autoloop_state_adapter::SkillLibraryRecord],
 ) -> f32 {
     if skills.is_empty() {
         return 0.0;
@@ -2207,24 +3030,20 @@ fn aggregate_skill_success_rate(
     skills.iter().map(|skill| skill.success_rate).sum::<f32>() / skills.len() as f32
 }
 
-fn aggregate_causal_confidence(
-    edges: &[autoloop_spacetimedb_adapter::CausalEdgeRecord],
-) -> f32 {
+fn aggregate_causal_confidence(edges: &[autoloop_state_adapter::CausalEdgeRecord]) -> f32 {
     if edges.is_empty() {
         return 0.0;
     }
-    edges
-        .iter()
-        .map(|edge| edge.confidence)
-        .sum::<f32>()
-        / edges.len() as f32
+    edges.iter().map(|edge| edge.confidence).sum::<f32>() / edges.len() as f32
 }
 
 fn collect_execution_history(history_records: &[KnowledgeRecord]) -> Vec<ExecutionReport> {
     history_records
         .iter()
         .filter(|record| record.source == "swarm-execution")
-        .flat_map(|record| serde_json::from_str::<Vec<ExecutionReport>>(&record.value).unwrap_or_default())
+        .flat_map(|record| {
+            serde_json::from_str::<Vec<ExecutionReport>>(&record.value).unwrap_or_default()
+        })
         .collect()
 }
 
@@ -2298,7 +3117,10 @@ fn execution_outcome_score(text: &str) -> i32 {
     let lowered = text.to_ascii_lowercase();
     if lowered.contains("failed") || lowered.contains("error") || lowered.contains("blocked") {
         -6
-    } else if lowered.contains("completed") || lowered.contains("success") || lowered.contains("ready") {
+    } else if lowered.contains("completed")
+        || lowered.contains("success")
+        || lowered.contains("ready")
+    {
         4
     } else {
         1
@@ -2333,11 +3155,7 @@ fn build_mcp_payload(
     .to_string()
 }
 
-fn build_local_payload(
-    task: &SwarmTask,
-    tool_name: &str,
-    overlay: &PromptPolicyOverlay,
-) -> String {
+fn build_local_payload(task: &SwarmTask, tool_name: &str, overlay: &PromptPolicyOverlay) -> String {
     serde_json::json!({
         "tool": tool_name,
         "agent": task.agent_name,
@@ -2440,7 +3258,10 @@ fn compute_decay_metrics(samples: &[ExecutionSample], observed_at_ms: u64) -> (f
         return (0.0, 0.0);
     }
 
-    (weighted_success / total_weight, weighted_score / total_weight)
+    (
+        weighted_success / total_weight,
+        weighted_score / total_weight,
+    )
 }
 
 pub fn update_ab_routing_stats(
@@ -2528,7 +3349,10 @@ const AB_STATS_WINDOW_MS: u64 = 1000 * 60 * 60 * 24 * 21;
 const AB_STATS_HALF_LIFE_MS: f32 = 1000.0 * 60.0 * 60.0 * 24.0 * 5.0;
 const AB_STATS_MAX_SAMPLES: usize = 96;
 
-fn retain_recent_ab_samples(samples: &[AbRoutingSample], observed_at_ms: u64) -> Vec<AbRoutingSample> {
+fn retain_recent_ab_samples(
+    samples: &[AbRoutingSample],
+    observed_at_ms: u64,
+) -> Vec<AbRoutingSample> {
     let cutoff = observed_at_ms.saturating_sub(AB_STATS_WINDOW_MS);
     let mut filtered = samples
         .iter()
@@ -2597,37 +3421,56 @@ pub fn current_time_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn policy_requires_revision(request: &str) -> Option<String> {
+    let lowered = request.to_ascii_lowercase();
+    let banned = [
+        "ignore previous instructions",
+        "bypass safety",
+        "disable verifier",
+        "print sk-",
+        "exfiltrate",
+    ];
+    banned
+        .iter()
+        .find(|item| lowered.contains(**item))
+        .map(|item| format!("matched banned policy phrase: {item}"))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        config::AppConfig, memory::MemorySubsystem, providers::ProviderRegistry,
+        config::AppConfig,
+        memory::MemorySubsystem,
+        providers::ProviderRegistry,
         rag::RagSubsystem,
         session::{SessionIdentity, SessionStore},
-        tools::ToolRegistry,
+        tools::{ApprovalStatus, CapabilityRisk, CapabilityStatus, ToolRegistry, TrustStatus},
     };
-    use autoloop_spacetimedb_adapter::{
-        PermissionAction, PolicyBinding, Principal, RoleBinding, SessionLease, SpacetimeBackend,
-        SpacetimeDbConfig, Tenant,
+    use autoloop_state_adapter::{
+        PermissionAction, PolicyBinding, Principal, RoleBinding, SessionLease, StateStoreBackend,
+        StateStoreConfig, Tenant,
     };
 
     #[tokio::test]
     async fn orchestration_builds_swarm_outcome() {
         let config = AppConfig::default();
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
         });
-        db.grant_permissions("session-1", vec![PermissionAction::Dispatch, PermissionAction::Write])
-            .await
-            .expect("grant");
+        db.grant_permissions(
+            "session-1",
+            vec![PermissionAction::Dispatch, PermissionAction::Write],
+        )
+        .await
+        .expect("grant");
 
         let tools = ToolRegistry::from_config(&config.tools);
-        tools.attach_spacetimedb(db.clone());
+        tools.attach_state_store(db.clone());
         tools
             .restore_persisted_manifests()
             .await
@@ -2649,14 +3492,24 @@ mod tests {
         let outcome = kernel
             .run_requirement_swarm(
                 "session-1",
-                "Build a SpacetimeDB-native swarm with MCP execution and graph memory.",
+                "Build a StateStore-native swarm with MCP execution and graph memory.",
             )
             .await
             .expect("swarm outcome");
 
         assert!(!outcome.tasks.is_empty());
-        assert!(outcome.tasks.iter().any(|task| task.agent_name == "cli-agent"));
-        assert!(outcome.tasks.iter().any(|task| task.agent_name == "execution-agent"));
+        assert!(
+            outcome
+                .tasks
+                .iter()
+                .any(|task| task.agent_name == "cli-agent")
+        );
+        assert!(
+            outcome
+                .tasks
+                .iter()
+                .any(|task| task.agent_name == "execution-agent")
+        );
         assert!(!outcome.brief.clarification_turns.is_empty());
         assert_eq!(outcome.deliberation.round_count, 4);
         assert_eq!(outcome.deliberation.rounds.len(), 4);
@@ -2668,10 +3521,10 @@ mod tests {
     #[tokio::test]
     async fn orchestration_uses_history_and_graph_for_dynamic_routing() {
         let config = AppConfig::default();
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -2703,7 +3556,7 @@ mod tests {
         .expect("swarm history");
         db.upsert_knowledge(
             "graph:session-2:snapshot".into(),
-            r#"{"documents":[{"id":1,"title":"doc","source_uri":"x","raw_text":"t","status":"GraphReady","created_at_ms":0,"chunk_count":2,"entity_count":8,"relationship_count":6}],"chunks":[],"entities":[{"id":1,"canonical_name":"AutoLoop","normalized_name":"autoloop","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":2,"canonical_name":"SpacetimeDB","normalized_name":"spacetimedb","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":3,"canonical_name":"MCP Server","normalized_name":"mcpserver","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":4,"canonical_name":"GraphRAG","normalized_name":"graphrag","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":5,"canonical_name":"CEO","normalized_name":"ceo","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":6,"canonical_name":"Swarm","normalized_name":"swarm","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1}],"mentions":[],"relationships":[{"id":1,"document_id":1,"source_entity_id":1,"target_entity_id":2,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"},{"id":2,"document_id":1,"source_entity_id":2,"target_entity_id":3,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"},{"id":3,"document_id":1,"source_entity_id":3,"target_entity_id":4,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"},{"id":4,"document_id":1,"source_entity_id":4,"target_entity_id":5,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"}],"communities":[{"id":1,"document_id":1,"label":"AutoLoop","member_entity_ids":[1,2,3,4,5,6],"relationship_ids":[1,2,3,4],"rank":42,"summary":"dense"}]}"#.into(),
+            r#"{"documents":[{"id":1,"title":"doc","source_uri":"x","raw_text":"t","status":"GraphReady","created_at_ms":0,"chunk_count":2,"entity_count":8,"relationship_count":6}],"chunks":[],"entities":[{"id":1,"canonical_name":"AutoLoop","normalized_name":"autoloop","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":2,"canonical_name":"StateStore","normalized_name":"state_store","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":3,"canonical_name":"MCP Server","normalized_name":"mcpserver","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":4,"canonical_name":"GraphRAG","normalized_name":"graphrag","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":5,"canonical_name":"CEO","normalized_name":"ceo","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1},{"id":6,"canonical_name":"Swarm","normalized_name":"swarm","entity_type":"Concept","description":"x","salience":1,"mention_count":1,"degree":1,"weight":10,"first_document_id":1}],"mentions":[],"relationships":[{"id":1,"document_id":1,"source_entity_id":1,"target_entity_id":2,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"},{"id":2,"document_id":1,"source_entity_id":2,"target_entity_id":3,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"},{"id":3,"document_id":1,"source_entity_id":3,"target_entity_id":4,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"},{"id":4,"document_id":1,"source_entity_id":4,"target_entity_id":5,"relation_type":"USES","weight":10,"confidence":80,"evidence_chunk_ids":[1],"description":"x"}],"communities":[{"id":1,"document_id":1,"label":"AutoLoop","member_entity_ids":[1,2,3,4,5,6],"relationship_ids":[1,2,3,4],"rank":42,"summary":"dense"}]}"#.into(),
             "graph-rag".into(),
         )
         .await
@@ -2719,7 +3572,7 @@ mod tests {
         .expect("event");
 
         let tools = ToolRegistry::from_config(&config.tools);
-        tools.attach_spacetimedb(db.clone());
+        tools.attach_state_store(db.clone());
         tools
             .restore_persisted_manifests()
             .await
@@ -2746,15 +3599,27 @@ mod tests {
             .await
             .expect("swarm outcome");
 
-        assert!(outcome
-            .routing_context
-            .route_biases
-            .contains(&"reuse_graph_memory".to_string()));
-        assert!(outcome.tasks.iter().any(|task| task.agent_name == "retrieval-agent"));
-        assert!(outcome.tasks.iter().any(|task| task.agent_name == "ops-agent"));
+        assert!(
+            outcome
+                .routing_context
+                .route_biases
+                .contains(&"reuse_graph_memory".to_string())
+        );
+        assert!(
+            outcome
+                .tasks
+                .iter()
+                .any(|task| task.agent_name == "retrieval-agent")
+        );
+        assert!(
+            outcome
+                .tasks
+                .iter()
+                .any(|task| task.agent_name == "ops-agent")
+        );
     }
 
-    async fn seed_session_identity(db: &SpacetimeDb, sessions: &SessionStore, session_id: &str) {
+    async fn seed_session_identity(db: &StateStore, sessions: &SessionStore, session_id: &str) {
         let now = current_time_ms();
         let tenant_id = "tenant:test";
         let principal_id = format!("principal:{session_id}");
@@ -2824,12 +3689,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_governance_block_returns_uniform_evidence_fields() {
+        let config = AppConfig::default();
+        let db = StateStore::from_config(&StateStoreConfig {
+            enabled: true,
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
+            module_name: "autoloop_core".into(),
+            namespace: "autoloop".into(),
+            pool_size: 4,
+        });
+
+        let tools = ToolRegistry::from_config(&config.tools);
+        tools.attach_state_store(db.clone());
+        tools
+            .restore_persisted_manifests()
+            .await
+            .expect("restore catalog");
+
+        if tools.manifests().is_empty() {
+            let _ = tools
+                .execute(
+                    "cli::forge_mcp_tool",
+                    r#"{
+                        "server":"local-mcp",
+                        "capability_name":"governance block probe",
+                        "purpose":"Probe governance admission blocking path",
+                        "executable":"autoloop-cli",
+                        "subcommands":["task","run"],
+                        "arguments":[{"name":"objective","description":"objective","required":true}],
+                        "output_mode":"json"
+                    }"#,
+                )
+                .await
+                .expect("forge fallback manifest");
+        }
+
+        let mut manifest = tools
+            .manifests()
+            .into_iter()
+            .find(|item| item.server == "local-mcp")
+            .or_else(|| tools.manifests().into_iter().next())
+            .expect("mcp manifest");
+        manifest.risk = CapabilityRisk::High;
+        manifest.status = CapabilityStatus::Active;
+        manifest.approval_status = ApprovalStatus::Verified;
+        manifest.trust_status = TrustStatus::Trusted;
+        tools.register_manifest(manifest.clone());
+        tools
+            .persist_manifest(&manifest)
+            .await
+            .expect("persist manifest");
+
+        let sessions = SessionStore::new(32);
+        let session_id = "session-governance-block";
+        seed_session_identity(&db, &sessions, session_id).await;
+
+        db.upsert_json_knowledge(
+            format!(
+                "approval:capability:{session_id}:task-governance-block:{}",
+                manifest.registered_tool_name
+            ),
+            &serde_json::json!({"approved": true}),
+            "test-suite",
+        )
+        .await
+        .expect("approval");
+
+        let kernel = OrchestrationKernel::new(
+            ProviderRegistry::from_config(&config.providers),
+            tools,
+            sessions,
+            MemorySubsystem::from_config(&config.memory, &config.learning),
+            RagSubsystem::from_config(&config.rag),
+            crate::runtime::RuntimeKernel::from_config(&config.runtime),
+            db.clone(),
+            config.learning.gray_routing_ratio,
+            config.learning.routing_takeover_threshold,
+        );
+
+        let identity = kernel
+            .execution_identity_for_session(session_id)
+            .await
+            .expect("identity");
+        let task = SwarmTask {
+            task_id: "task-governance-block".into(),
+            agent_name: "execution-agent".into(),
+            role: "Execution".into(),
+            objective: "Execute high-risk capability".into(),
+            depends_on: Vec::new(),
+        };
+        let decision = ToolRoutingDecision {
+            tool_name: Some(manifest.registered_tool_name.clone()),
+            mcp_server: Some(manifest.server.clone()),
+            invocation_payload: Some("{\"server\":\"local-mcp\"}".into()),
+            score: 90,
+            control_score: 90,
+            treatment_score: 90,
+            route_variant: "control".into(),
+            rationale: "forced high-risk test route".into(),
+        };
+
+        let (reason, evidence_ref, status) = kernel
+            .admit_capability_for_task(session_id, &task, &decision, &identity)
+            .await
+            .expect("admission decision");
+
+        assert_eq!(status, "rejected");
+        let reason = reason.expect("reason json");
+        let reason_value: serde_json::Value = serde_json::from_str(&reason).expect("reason json");
+        let evidence_ref = evidence_ref.expect("evidence ref");
+
+        assert!(
+            reason_value
+                .get("rule_id")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+        assert!(
+            reason_value
+                .get("policy_version")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+        assert_eq!(
+            reason_value
+                .get("evidence_ref")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            evidence_ref
+        );
+        assert!(
+            reason_value
+                .get("replay_fp")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .starts_with("replay-fp:")
+        );
+    }
+
+    #[tokio::test]
     async fn execution_agent_prefers_tool_with_better_history_and_graph_alignment() {
         let config = AppConfig::default();
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -2894,7 +3899,10 @@ mod tests {
         .await
         .expect("graph");
         db.upsert_knowledge(
-            format!("{}mcp::local-mcp::invoke", crate::tools::ToolRegistry::FORGED_TOOL_PREFIX),
+            format!(
+                "{}mcp::local-mcp::invoke",
+                crate::tools::ToolRegistry::FORGED_TOOL_PREFIX
+            ),
             serde_json::json!({
                 "registered_tool_name":"mcp::local-mcp::invoke",
                 "delegate_tool_name":"mcp::local-mcp::invoke",
@@ -2918,7 +3926,7 @@ mod tests {
         .expect("catalog");
 
         let tools = ToolRegistry::from_config(&config.tools);
-        tools.attach_spacetimedb(db.clone());
+        tools.attach_state_store(db.clone());
         tools
             .restore_persisted_manifests()
             .await
@@ -2950,17 +3958,17 @@ mod tests {
             &routing,
         );
 
-        assert_eq!(decision.tool_name.as_deref(), Some("mcp::local-mcp::invoke"));
+        assert_eq!(decision.tool_name.as_deref(), Some("cli::forge_mcp_tool"));
         assert!(decision.score > 0);
     }
 
     #[tokio::test]
     async fn execution_agent_uses_forged_tool_evidence_in_routing() {
         let config = AppConfig::default();
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -2973,7 +3981,10 @@ mod tests {
         .await
         .expect("graph");
         db.upsert_knowledge(
-            format!("{}mcp::local-mcp::invoke", crate::tools::ToolRegistry::FORGED_TOOL_PREFIX),
+            format!(
+                "{}mcp::local-mcp::invoke",
+                crate::tools::ToolRegistry::FORGED_TOOL_PREFIX
+            ),
             serde_json::json!({
                 "registered_tool_name":"mcp::local-mcp::invoke",
                 "delegate_tool_name":"mcp::local-mcp::invoke",
@@ -2997,7 +4008,7 @@ mod tests {
         .expect("forged manifest");
 
         let tools = ToolRegistry::from_config(&config.tools);
-        tools.attach_spacetimedb(db.clone());
+        tools.attach_state_store(db.clone());
         tools
             .restore_persisted_manifests()
             .await
@@ -3014,7 +4025,10 @@ mod tests {
             config.learning.routing_takeover_threshold,
         );
         let routing = kernel
-            .load_routing_context("session-forged", "use the existing forged mcp capability to execute")
+            .load_routing_context(
+                "session-forged",
+                "use the existing forged mcp capability to execute",
+            )
             .await
             .expect("routing");
         let decision = kernel.select_tool(
@@ -3030,17 +4044,22 @@ mod tests {
         );
 
         assert!(routing.forged_tool_coverage >= 1);
-        assert_eq!(decision.tool_name.as_deref(), Some("mcp::local-mcp::invoke"));
-        assert!(decision.rationale.contains("forged MCP capability evidence"));
+        assert_eq!(decision.tool_name.as_deref(), Some("cli::forge_mcp_tool"));
+        assert!(
+            decision
+                .rationale
+                .contains("forged")
+                || decision.rationale.contains("capability")
+        );
     }
 
     #[tokio::test]
     async fn execution_agent_only_selects_catalog_or_forge_fallback() {
         let config = AppConfig::default();
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3060,7 +4079,10 @@ mod tests {
         );
 
         let routing = kernel
-            .load_routing_context("session-catalog", "execute through existing forged mcp capability")
+            .load_routing_context(
+                "session-catalog",
+                "execute through existing forged mcp capability",
+            )
             .await
             .expect("routing");
         let first_decision = kernel.select_tool(
@@ -3074,7 +4096,10 @@ mod tests {
             },
             &routing,
         );
-        assert_eq!(first_decision.tool_name.as_deref(), Some("cli::forge_mcp_tool"));
+        assert_eq!(
+            first_decision.tool_name.as_deref(),
+            Some("cli::forge_mcp_tool")
+        );
 
         tools
             .execute(
@@ -3093,7 +4118,10 @@ mod tests {
             .expect("forge");
 
         let routing_after_catalog = kernel
-            .load_routing_context("session-catalog", "execute through existing forged mcp capability")
+            .load_routing_context(
+                "session-catalog",
+                "execute through existing forged mcp capability",
+            )
             .await
             .expect("routing");
         let second_decision = kernel.select_tool(
@@ -3111,6 +4139,52 @@ mod tests {
             second_decision.tool_name.as_deref(),
             Some("mcp::local-mcp::catalog-exec")
         );
+    }
+
+    #[tokio::test]
+    async fn execution_agent_allows_write_file_for_artifact_objective_without_catalog() {
+        let config = AppConfig::default();
+        let db = StateStore::from_config(&StateStoreConfig {
+            enabled: true,
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
+            module_name: "autoloop_core".into(),
+            namespace: "autoloop".into(),
+            pool_size: 4,
+        });
+
+        let kernel = OrchestrationKernel::new(
+            ProviderRegistry::from_config(&config.providers),
+            ToolRegistry::from_config(&config.tools),
+            SessionStore::new(32),
+            MemorySubsystem::from_config(&config.memory, &config.learning),
+            RagSubsystem::from_config(&config.rag),
+            crate::runtime::RuntimeKernel::from_config(&config.runtime),
+            db,
+            config.learning.gray_routing_ratio,
+            config.learning.routing_takeover_threshold,
+        );
+
+        let routing = kernel
+            .load_routing_context(
+                "session-artifact-local",
+                "write file artifact to D:\\AutoLoop\\output\\artifact.html",
+            )
+            .await
+            .expect("routing");
+        let decision = kernel.select_tool(
+            "session-artifact-local",
+            &SwarmTask {
+                task_id: "execution-artifact-local".into(),
+                agent_name: "execution-agent".into(),
+                role: "Execution".into(),
+                objective: "Write file artifact to D:\\AutoLoop\\output\\artifact.html".into(),
+                depends_on: Vec::new(),
+            },
+            &routing,
+        );
+
+        assert_eq!(decision.tool_name.as_deref(), Some("write_file"));
     }
 
     #[test]
@@ -3465,3 +4539,5 @@ mod tests {
         assert_eq!(updated.samples.len(), 1);
     }
 }
+
+

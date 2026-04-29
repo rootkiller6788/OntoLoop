@@ -1,10 +1,14 @@
-use anyhow::{Result, bail};
-use autoloop_spacetimedb_adapter::SpacetimeDb;
+﻿use anyhow::{Result, bail};
+use autoloop_state_adapter::StateStore;
 use serde::Serialize;
 
 use crate::{
     config::HooksConfig,
-    memory::{LearningProposal, MemorySubsystem, SkillPromotionRecord, SkillRecord},
+    contracts::signal::SignalContext,
+    contracts::version::CONTRACT_VERSION,
+    memory::{LearningProposal, LearningSignal, MemorySubsystem, SkillPromotionRecord, SkillRecord},
+    observability::event_stream::append_event,
+    orchestration::current_time_ms,
     runtime::IterationRecord,
     security::SecurityPolicy,
     tools::ExecutionStep,
@@ -91,7 +95,10 @@ impl HookRegistry {
         let mut tasks = Vec::new();
 
         for anchor in anchors {
-            if !assistant_response.to_ascii_lowercase().contains(&anchor.to_ascii_lowercase()) {
+            if !assistant_response
+                .to_ascii_lowercase()
+                .contains(&anchor.to_ascii_lowercase())
+            {
                 tasks.push(LearningTask {
                     hook_name: "self-learn".into(),
                     anchor,
@@ -115,14 +122,21 @@ impl HookRegistry {
 
     pub async fn schedule_learning_tasks(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         actor_id: &str,
         user_input: &str,
         assistant_response: &str,
     ) -> Result<Vec<LearningTask>> {
         let tasks = self.plan_learning_tasks(user_input, assistant_response);
-        if tasks.is_empty() || !db.has_permission(actor_id, autoloop_spacetimedb_adapter::PermissionAction::Dispatch).await? {
+        if tasks.is_empty()
+            || !db
+                .has_permission(
+                    actor_id,
+                    autoloop_state_adapter::PermissionAction::Dispatch,
+                )
+                .await?
+        {
             return Ok(tasks);
         }
 
@@ -153,7 +167,11 @@ impl HookRegistry {
         if !record.keep {
             hooks.push(IterationLearningHook {
                 proposal_anchor: anchor.to_string(),
-                actions: record.actions.iter().map(|result| result.action.clone()).collect(),
+                actions: record
+                    .actions
+                    .iter()
+                    .map(|result| result.action.clone())
+                    .collect(),
                 reason: record
                     .rollback_reason
                     .clone()
@@ -166,7 +184,7 @@ impl HookRegistry {
 
     pub async fn run_governed_learning_pipeline(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         memory: &MemorySubsystem,
         security: &SecurityPolicy,
         session_id: &str,
@@ -180,23 +198,65 @@ impl HookRegistry {
             return Ok(outcomes);
         }
         if !db
-            .has_permission(actor_id, autoloop_spacetimedb_adapter::PermissionAction::Dispatch)
+            .has_permission(
+                actor_id,
+                autoloop_state_adapter::PermissionAction::Dispatch,
+            )
             .await?
         {
             return Ok(outcomes);
         }
 
         for task in tasks {
+            let trace_id = format!("learning:{}:{}", session_id, current_time_ms());
+            let signal_context = build_hook_signal_context(
+                session_id,
+                &trace_id,
+                Some(&task.anchor),
+                Some("learning:promotion-verifier"),
+            );
             let proposal = memory.draft_learning_proposal(
                 session_id,
                 &task.anchor,
                 &task.reason,
                 assistant_response,
             );
-            let evidence = memory.collect_evidence_pack(db, session_id, &proposal).await?;
+            let evidence = memory
+                .collect_evidence_pack(db, session_id, &proposal)
+                .await?;
             let verdict = security.evaluate_learning_gate(&proposal, &evidence);
+            let decision_event = append_event(
+                db,
+                "verifier.promotion_decision",
+                trace_id.clone(),
+                session_id.to_string(),
+                None,
+                Some("learning:promotion-verifier".into()),
+                CONTRACT_VERSION,
+                serde_json::json!({
+                    "verifier_layer": "promotion_verifier",
+                    "proposal_id": proposal.proposal_id,
+                    "approved": verdict.approved,
+                    "reason": verdict.reason,
+                    "canary_ratio": verdict.canary_ratio,
+                    "rollback_window_ms": verdict.rollback_window_ms,
+                    "signal_context": signal_context.clone(),
+                }),
+            )
+            .await?;
+            let learning_signal = LearningSignal {
+                signal_id: format!("learning-signal:{}:{}", session_id, proposal.proposal_id),
+                session_id: session_id.to_string(),
+                trace_id: trace_id.clone(),
+                source: "hooks.learning_pipeline".to_string(),
+                evidence_ref: format!("eventlog:{}", decision_event.event_id),
+                metadata: std::collections::BTreeMap::from([
+                    ("proposal_id".to_string(), proposal.proposal_id.clone()),
+                    ("verifier_layer".to_string(), "promotion_verifier".to_string()),
+                ]),
+            };
             memory
-                .persist_learning_proposal(db, &proposal, &evidence, &verdict)
+                .persist_learning_proposal(db, &proposal, &evidence, &verdict, &learning_signal)
                 .await?;
 
             let mut promotion = None;
@@ -211,7 +271,13 @@ impl HookRegistry {
                     confidence: proposal.proposed_confidence,
                 };
                 let promoted = memory
-                    .promote_skill_with_verdict(db, &proposal, &verdict, &candidate)
+                    .promote_skill_with_verdict(
+                        db,
+                        &proposal,
+                        &verdict,
+                        &candidate,
+                        &learning_signal,
+                    )
                     .await?;
                 db.create_schedule_event(
                     session_id.to_string(),
@@ -227,8 +293,42 @@ impl HookRegistry {
                     actor_id.to_string(),
                 )
                 .await?;
+                let _ = append_event(
+                    db,
+                    "learning.promotion_record",
+                    trace_id.clone(),
+                    session_id.to_string(),
+                    None,
+                    Some("learning:promotion-verifier".into()),
+                    CONTRACT_VERSION,
+                    serde_json::json!({
+                        "proposal_id": proposal.proposal_id,
+                        "skill_name": promoted.skill_name,
+                        "verifier_layer": "promotion_verifier",
+                        "decision": "promote",
+                        "signal_context": signal_context.clone(),
+                    }),
+                )
+                .await;
                 promotion = Some(promoted);
             } else {
+                let _ = append_event(
+                    db,
+                    "learning.rollback_record",
+                    trace_id.clone(),
+                    session_id.to_string(),
+                    None,
+                    Some("learning:promotion-verifier".into()),
+                    CONTRACT_VERSION,
+                    serde_json::json!({
+                        "proposal_id": proposal.proposal_id,
+                        "verifier_layer": "promotion_verifier",
+                        "decision": "rollback",
+                        "reason": verdict.reason,
+                        "signal_context": signal_context.clone(),
+                    }),
+                )
+                .await;
                 db.create_schedule_event(
                     session_id.to_string(),
                     "hooks.learning_rejected".into(),
@@ -255,12 +355,35 @@ impl HookRegistry {
     }
 }
 
+fn build_hook_signal_context(
+    session_id: &str,
+    trace_id: &str,
+    task_id: Option<&str>,
+    capability_id: Option<&str>,
+) -> SignalContext {
+    SignalContext {
+        session_id: session_id.to_string(),
+        trace_id: trace_id.to_string(),
+        span_id: Some(format!(
+            "span:{}:{}",
+            trace_id,
+            task_id.unwrap_or("task-none")
+        )),
+        task_id: task_id.map(|value| value.to_string()),
+        capability_id: capability_id.map(|value| value.to_string()),
+        tenant_id: None,
+        principal_id: None,
+    }
+}
+
 fn extract_anchors(user_input: &str) -> Vec<String> {
     user_input
         .split_whitespace()
         .filter_map(|token| {
             let normalized = token
-                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != ':' && ch != '#' && ch != '-')
+                .trim_matches(|ch: char| {
+                    !ch.is_ascii_alphanumeric() && ch != ':' && ch != '#' && ch != '-'
+                })
                 .to_ascii_lowercase();
 
             if normalized.starts_with("anchor:") {
@@ -292,7 +415,7 @@ fn response_signals_uncertainty(response: &str) -> bool {
 mod tests {
     use super::*;
     use crate::{config::AppConfig, memory::MemorySubsystem, security::SecurityPolicy};
-    use autoloop_spacetimedb_adapter::{PermissionAction, SpacetimeBackend, SpacetimeDbConfig};
+    use autoloop_state_adapter::{PermissionAction, StateStoreBackend, StateStoreConfig};
 
     #[test]
     fn hooks_detect_anchor_and_gap_signals() {
@@ -304,27 +427,27 @@ mod tests {
         };
 
         let tasks = hooks.plan_learning_tasks(
-            "Please expand anchor:GraphRAG and #spacetimedb",
+            "Please expand anchor:GraphRAG and #state_store",
             "I am not sure about the retrieval path yet.",
         );
 
         assert!(tasks.iter().any(|task| task.anchor == "graphrag"));
-        assert!(tasks.iter().any(|task| task.anchor == "spacetimedb"));
+        assert!(tasks.iter().any(|task| task.anchor == "state_store"));
         assert!(tasks.iter().any(|task| task.anchor == "knowledge-gap"));
     }
 
     #[tokio::test]
-    async fn hooks_schedule_tasks_into_spacetimedb() {
+    async fn hooks_schedule_tasks_into_state_store() {
         let hooks = HookRegistry {
             hooks: vec![HookSpec {
                 name: "self-learn".into(),
             }],
             learning_hooks_enabled: true,
         };
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -339,7 +462,7 @@ mod tests {
                 &db,
                 "session-1",
                 "agent-1",
-                "Investigate anchor:spacetimedb",
+                "Investigate anchor:state_store",
                 "Need more data before I can answer completely.",
             )
             .await
@@ -363,10 +486,10 @@ mod tests {
         };
         let memory = MemorySubsystem::from_config(&config.memory, &config.learning);
         let security = SecurityPolicy::from_config(&config.security);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -397,3 +520,4 @@ mod tests {
         assert!(skills.is_empty());
     }
 }
+

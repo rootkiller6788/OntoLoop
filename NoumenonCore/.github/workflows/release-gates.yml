@@ -1,0 +1,59 @@
+name: release-gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: release-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-matrix:
+    name: matrix-${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: default
+            command: cargo test
+          - profile: core
+            command: cargo test --no-default-features --features core
+          - profile: extensions
+            command: cargo test --features extensions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ${{ matrix.profile }} test matrix
+        run: ${{ matrix.command }}
+
+  critical-gates:
+    name: critical-gates
+    runs-on: ubuntu-latest
+    needs: test-matrix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Sovereignty gate
+        run: cargo test rejects_non_mandatory_operation_modes
+      - name: Sigstore admission gate
+        run: cargo test rejects_sigstore_failure_without_evidence
+      - name: Runtime hardening profile gate
+        run: cargo test rejects_wasm_path_without_hardening_profile
+      - name: Runtime syscall constraint gate
+        run: cargo test rejects_wasm_path_without_syscall_constraints
+      - name: Runtime isolation gate
+        run: cargo test high_risk_requires_isolation_constraints
+      - name: Evidence context binding gate
+        run: cargo test records_execution_context_binding_in_evidence
+      - name: Completed implies validate pass gate
+        run: cargo test completed_implies_validate_pass_contract
+      - name: Invariant suite gate
+        run: cargo test --test invariants

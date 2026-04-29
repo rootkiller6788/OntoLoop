@@ -1,0 +1,46 @@
+[package]
+name = "trustkernel"
+version = "0.1.0"
+edition = "2024"
+description = "NoumenonCore: verified execution kernel for AI agents"
+license = "Apache-2.0"
+
+[features]
+default = ["core"]
+core = []
+ext-evolution = []
+ext-observability = []
+ext-memory = []
+ext-tooling = []
+ext-truth = []
+extensions = [
+    "ext-evolution",
+    "ext-observability",
+    "ext-memory",
+    "ext-tooling",
+    "ext-truth",
+]
+
+[dependencies]
+anyhow = "1"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+
+[package.metadata.release_gates]
+matrix_commands = [
+    "cargo test",
+    "cargo test --no-default-features --features core",
+    "cargo test --features extensions",
+]
+critical_tests = [
+    "cargo test rejects_non_mandatory_operation_modes",
+    "cargo test rejects_sigstore_failure_without_evidence",
+    "cargo test rejects_wasm_path_without_hardening_profile",
+    "cargo test rejects_wasm_path_without_syscall_constraints",
+    "cargo test high_risk_requires_isolation_constraints",
+    "cargo test records_execution_context_binding_in_evidence",
+    "cargo test completed_implies_validate_pass_contract",
+    "cargo test --test invariants",
+]
+

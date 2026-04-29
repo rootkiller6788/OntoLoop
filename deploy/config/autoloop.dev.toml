@@ -1,11 +1,11 @@
-[app]
-name = "autoloop-dev"
+﻿[app]
+name = "ontoloop-dev"
 workspace_root = "."
 
 [agent]
 max_iterations = 12
 memory_window = 100
-system_prompt = "You are AutoLoop development runtime."
+system_prompt = "You are OntoLoop development runtime."
 
 [runtime]
 max_parallel_agents = 4
@@ -19,6 +19,17 @@ mcp_breaker_cooldown_ms = 300000
 gate_mode = "shadow"
 gate_enforce_ratio = 0.2
 rollback_contract_version = "v1"
+attestation_required = false
+attestation_backend = "env"
+attestation_remote_url = ""
+attestation_token_env = "AUTOLOOP_ATTESTATION_TOKEN"
+attestation_secret_env = "AUTOLOOP_ATTESTATION_SECRET"
+attestation_quote_env = "AUTOLOOP_ATTESTATION_QUOTE"
+attestation_cert_chain_env = "AUTOLOOP_ATTESTATION_CERT_CHAIN"
+attestation_cert_subject_allowlist = []
+trust_evidence_ledger_path = "deploy/runtime/trust/evidence.log"
+trust_budget_ledger_path = "deploy/runtime/trust/budget.log"
+trust_ledger_consistency_mode = "strong"
 
 [security]
 profile = "minimal-ironclaw"
@@ -66,7 +77,7 @@ self_hosted_scraper_url = ""
 request_timeout_secs = 20
 retry_attempts = 2
 stability_backoff_ms = 350
-user_agent = "autoloop-dev/0.1"
+user_agent = "ontoloop-dev/0.1"
 
 [rag]
 enable_graph_rag = true
@@ -101,16 +112,39 @@ failure_forensics_enabled = true
 dashboard_enabled = true
 report_top_k = 8
 
+[observability.alert_thresholds]
+p95_latency_ms = 120000
+error_rate = 0.05
+mttr_ms = 60000
+open_circuit_count = 1
+
 [deployment]
 profile = "development"
 enable_container_assets = true
 config_dir = "deploy/config"
 backup_dir = "deploy/backup"
 
-[spacetimedb]
+[storage]
+backend = "postgres"
+mode = "direct"
+shadow_read_preference = "postgres"
+shadow_read_rollout_percent = 100
+shadow_write_grace_hours = 24
+
+[storage.postgres]
+enabled = true
+uri = "postgres://postgres:123456@localhost:5432/postgres"
+pool_size = 16
+schema = "public"
+app_name = "ontoloop-dev"
+
+[state_store]
 enabled = true
 backend = "in_memory"
-uri = "http://spacetimedb:3000"
+uri = "http://state_store:3000"
 module_name = "autoloop_core"
 namespace = "autoloop"
 pool_size = 8
+
+
+

@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use autoloop::session::{
-    audit::InMemoryAuditSink,
-    machine::WorkflowMachine,
-    signal::WorkflowSignal,
+    audit::InMemoryAuditSink, machine::WorkflowMachine, signal::WorkflowSignal,
     state::WorkflowState,
 };
 
@@ -54,7 +52,10 @@ async fn e2e_verify_reject_revise_path() {
         .await
         .expect("intake");
     machine
-        .apply(WorkflowSignal::PolicyApproved, Some("policy approved".into()))
+        .apply(
+            WorkflowSignal::PolicyApproved,
+            Some("policy approved".into()),
+        )
         .await
         .expect("policy");
     machine
@@ -88,3 +89,6 @@ async fn e2e_verify_reject_revise_path() {
         record.signal == WorkflowSignal::VerifyRejected && record.to == WorkflowState::Planned
     }));
 }
+
+
+

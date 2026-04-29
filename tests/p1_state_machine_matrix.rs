@@ -1,8 +1,4 @@
-use autoloop::session::{
-    signal::WorkflowSignal,
-    state::WorkflowState,
-    transition::next_state,
-};
+use autoloop::session::{signal::WorkflowSignal, state::WorkflowState, transition::next_state};
 
 #[test]
 fn covers_legal_and_illegal_transitions_for_all_states() {
@@ -65,3 +61,6 @@ fn covers_legal_and_illegal_transitions_for_all_states() {
         );
     }
 }
+
+
+

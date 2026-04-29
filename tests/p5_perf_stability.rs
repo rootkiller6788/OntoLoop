@@ -4,12 +4,12 @@ use autoloop::{
         ids::{CapabilityId, SessionId, TaskId, TraceId},
         types::{ConstraintSet, ExecutionIdentity, TaskEnvelope},
     },
+    orchestration::{ExecutionReport, SwarmTask},
     providers::ProviderRegistry,
     runtime::RuntimeKernel,
-    orchestration::{ExecutionReport, SwarmTask},
-    spacetimedb_adapter::{
-        PolicyBinding, Principal, RoleBinding, SessionLease, SpacetimeBackend, SpacetimeDb,
-        SpacetimeDbConfig, Tenant,
+    state_store_adapter::{
+        PolicyBinding, Principal, RoleBinding, SessionLease, StateStoreBackend, StateStore,
+        StateStoreConfig, Tenant,
     },
     tools::ToolRegistry,
 };
@@ -21,10 +21,10 @@ async fn baseline_concurrent_execute_is_stable() {
     let runtime = RuntimeKernel::from_config(&app_config.runtime);
     let providers = ProviderRegistry::from_config(&app_config.providers);
     let tools = ToolRegistry::from_config(&app_config.tools);
-    let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+    let db = StateStore::from_config(&StateStoreConfig {
         enabled: true,
-        backend: SpacetimeBackend::InMemory,
-        uri: "http://spacetimedb:3000".into(),
+        backend: StateStoreBackend::InMemory,
+        uri: "http://state_store:3000".into(),
         module_name: "autoloop_core".into(),
         namespace: "autoloop".into(),
         pool_size: 8,
@@ -60,6 +60,7 @@ async fn baseline_concurrent_execute_is_stable() {
                     sandbox_profile: "provider".into(),
                     requires_human_approval: false,
                 },
+                trust_plan: None,
             };
             runtime
                 .execute(
@@ -87,10 +88,10 @@ async fn baseline_circuit_recovery_state_is_observable() {
     app_config.runtime.tool_breaker_failure_threshold = 1;
     app_config.runtime.tool_breaker_cooldown_ms = 1;
     let runtime = RuntimeKernel::from_config(&app_config.runtime);
-    let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+    let db = StateStore::from_config(&StateStoreConfig {
         enabled: true,
-        backend: SpacetimeBackend::InMemory,
-        uri: "http://spacetimedb:3000".into(),
+        backend: StateStoreBackend::InMemory,
+        uri: "http://state_store:3000".into(),
         module_name: "autoloop_core".into(),
         namespace: "autoloop".into(),
         pool_size: 4,
@@ -120,7 +121,9 @@ async fn baseline_circuit_recovery_state_is_observable() {
         .expect("record outcome");
     let snapshot = runtime.circuit_snapshot(&db).await.expect("snapshot");
     assert!(
-        snapshot.keys().any(|key| key.contains("metrics:circuit:tool:mcp::local-mcp::invoke")),
+        snapshot
+            .keys()
+            .any(|key| key.contains("metrics:circuit:tool:mcp::local-mcp::invoke")),
         "circuit snapshot should contain tool breaker state"
     );
 }
@@ -134,7 +137,7 @@ fn identity_for(session_id: &str) -> ExecutionIdentity {
     }
 }
 
-async fn seed_identity(db: &SpacetimeDb, session_id: &str) {
+async fn seed_identity(db: &StateStore, session_id: &str) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -188,3 +191,7 @@ async fn seed_identity(db: &SpacetimeDb, session_id: &str) {
     .await
     .expect("lease");
 }
+
+
+
+

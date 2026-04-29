@@ -1,0 +1,10 @@
+[package]
+name = "ontoloop-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Immutable execution constitution core for OntoLoop"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+

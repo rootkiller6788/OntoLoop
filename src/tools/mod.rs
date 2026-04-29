@@ -1,22 +1,23 @@
-mod cli_forge;
+﻿mod cli_forge;
 
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Result, bail};
-use autoloop_spacetimedb_adapter::SpacetimeDb;
 use async_trait::async_trait;
+use autoloop_state_adapter::StateStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::ToolsConfig;
+use crate::contracts::signal::SignalContext;
 
 pub use cli_forge::{
-    ApprovalStatus, CapabilityArtifact, CapabilityRisk, CapabilityScope, CapabilityStatus,
-    CliAnythingForgeTool,
-    CapabilityDeprecationTool, CapabilityRollbackTool, CapabilityVerifierTool, CliOutputMode,
-    ForgeArgumentSpec, ForgedMcpToolManifest, ForgedToolCatalog, McpToolForgeRequest, Provenance,
-    RenderedCommandSpec, build_command_spec,
-    Sbom, SbomComponent, Signature, SignatureAlgorithm, TrustPolicy, TrustStatus, sanitize_segment,
+    ApprovalStatus, CapabilityArtifact, CapabilityDeprecationTool, CapabilityRisk,
+    CapabilityRollbackTool, CapabilityScope, CapabilityStatus, CapabilityVerifierTool,
+    CliAnythingForgeTool, CliOutputMode, ForgeArgumentSpec, ForgedMcpToolManifest,
+    ForgedToolCatalog, McpToolForgeRequest, Provenance, RenderedCommandSpec, Sbom, SbomComponent,
+    Signature, SignatureAlgorithm, TrustPolicy, TrustStatus, build_command_spec, sanitize_segment,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,22 +28,12 @@ pub struct ToolResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExecutionStep {
-    ApplyPatch {
-        target: String,
-        summary: String,
-    },
-    RunCommand {
-        command: String,
-        timeout_secs: u64,
-    },
-    ParseMetrics {
-        source: String,
-    },
+    ApplyPatch { target: String, summary: String },
+    RunCommand { command: String, timeout_secs: u64 },
+    ParseMetrics { source: String },
     Keep,
     Discard,
-    Rollback {
-        reason: String,
-    },
+    Rollback { reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,7 +130,7 @@ pub struct ToolRegistry {
     tools: Arc<RwLock<HashMap<String, Arc<dyn Tool>>>>,
     manifests: Arc<RwLock<HashMap<String, ForgedMcpToolManifest>>>,
     lineage_max_versions: Arc<RwLock<HashMap<String, u32>>>,
-    spacetimedb: Arc<RwLock<Option<SpacetimeDb>>>,
+    state_store: Arc<RwLock<Option<StateStore>>>,
     pub allow_shell: bool,
 }
 
@@ -151,12 +142,17 @@ impl ToolRegistry {
             tools: Arc::new(RwLock::new(HashMap::new())),
             manifests: Arc::new(RwLock::new(HashMap::new())),
             lineage_max_versions: Arc::new(RwLock::new(HashMap::new())),
-            spacetimedb: Arc::new(RwLock::new(None)),
+            state_store: Arc::new(RwLock::new(None)),
             allow_shell: config.allow_shell,
         };
 
         for name in &config.builtin {
-            registry.register_tool(Arc::new(StubTool::new(name.clone())));
+            let builtin: Arc<dyn Tool> = match name.as_str() {
+                "read_file" => Arc::new(ReadFileTool),
+                "write_file" => Arc::new(WriteFileTool),
+                _ => Arc::new(StubTool::new(name.clone())),
+            };
+            registry.register_tool(builtin);
         }
 
         for server in &config.mcp_servers {
@@ -202,9 +198,7 @@ impl ToolRegistry {
     }
 
     pub fn register_tool(&self, tool: Arc<dyn Tool>) {
-        self.tools
-            .write()
-            .insert(tool.name().to_string(), tool);
+        self.tools.write().insert(tool.name().to_string(), tool);
     }
 
     pub fn register_manifest(&self, manifest: ForgedMcpToolManifest) {
@@ -218,21 +212,16 @@ impl ToolRegistry {
             .insert(manifest.registered_tool_name.clone(), manifest);
     }
 
-    pub fn attach_spacetimedb(&self, db: SpacetimeDb) {
-        *self.spacetimedb.write() = Some(db);
+    pub fn attach_state_store(&self, db: StateStore) {
+        *self.state_store.write() = Some(db);
     }
 
-    pub fn spacetimedb(&self) -> Option<SpacetimeDb> {
-        self.spacetimedb.read().clone()
+    pub fn state_store(&self) -> Option<StateStore> {
+        self.state_store.read().clone()
     }
 
     pub fn manifests(&self) -> Vec<ForgedMcpToolManifest> {
-        let mut manifests = self
-            .manifests
-            .read()
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut manifests = self.manifests.read().values().cloned().collect::<Vec<_>>();
         manifests.sort_by(|left, right| left.registered_tool_name.cmp(&right.registered_tool_name));
         manifests
     }
@@ -259,7 +248,10 @@ impl ToolRegistry {
             .into_iter()
             .map(|(lineage_key, mut manifests)| {
                 manifests.sort_by_key(|manifest| manifest.version);
-                let latest_version = manifests.last().map(|manifest| manifest.version).unwrap_or(1);
+                let latest_version = manifests
+                    .last()
+                    .map(|manifest| manifest.version)
+                    .unwrap_or(1);
                 let active = manifests
                     .iter()
                     .find(|manifest| manifest.status == CapabilityStatus::Active)
@@ -286,13 +278,20 @@ impl ToolRegistry {
                 let average_health = if manifests.is_empty() {
                     0.0
                 } else {
-                    manifests.iter().map(|manifest| manifest.health_score).sum::<f32>()
+                    manifests
+                        .iter()
+                        .map(|manifest| manifest.health_score)
+                        .sum::<f32>()
                         / manifests.len() as f32
                 };
                 let tool_name = active
                     .as_ref()
                     .map(|manifest| manifest.registered_tool_name.clone())
-                    .or_else(|| manifests.last().map(|manifest| manifest.registered_tool_name.clone()))
+                    .or_else(|| {
+                        manifests
+                            .last()
+                            .map(|manifest| manifest.registered_tool_name.clone())
+                    })
                     .unwrap_or_else(|| lineage_key.clone());
                 let status_summary = if active.is_none() {
                     "no active version".to_string()
@@ -319,7 +318,10 @@ impl ToolRegistry {
 
         CapabilityLifecycleReport {
             total_lineages: entries.len(),
-            active_capabilities: entries.iter().filter(|entry| entry.active_version.is_some()).count(),
+            active_capabilities: entries
+                .iter()
+                .filter(|entry| entry.active_version.is_some())
+                .count(),
             deprecated_capabilities: entries
                 .iter()
                 .filter(|entry| !entry.deprecated_versions.is_empty())
@@ -344,10 +346,16 @@ impl ToolRegistry {
             .collect::<Vec<_>>();
         let mut changed = Vec::new();
         for candidate in candidates {
-            if let Some(rolled_back) = self.rollback_capability(&candidate.registered_tool_name).await? {
+            if let Some(rolled_back) = self
+                .rollback_capability(&candidate.registered_tool_name)
+                .await?
+            {
                 changed.push(rolled_back);
             } else if let Some(deprecated) = self
-                .deprecate_capability(&candidate.registered_tool_name, candidate.health_score.min(0.35))
+                .deprecate_capability(
+                    &candidate.registered_tool_name,
+                    candidate.health_score.min(0.35),
+                )
                 .await?
             {
                 changed.push(deprecated);
@@ -357,9 +365,13 @@ impl ToolRegistry {
     }
 
     pub async fn persist_manifest(&self, manifest: &ForgedMcpToolManifest) -> Result<()> {
-        if let Some(db) = self.spacetimedb() {
+        if let Some(db) = self.state_store() {
             db.upsert_json_knowledge(
-                format!("{}{}", Self::FORGED_TOOL_PREFIX, manifest.registered_tool_name),
+                format!(
+                    "{}{}",
+                    Self::FORGED_TOOL_PREFIX,
+                    manifest.registered_tool_name
+                ),
                 manifest,
                 "cli-forge",
             )
@@ -369,11 +381,13 @@ impl ToolRegistry {
     }
 
     pub async fn restore_persisted_manifests(&self) -> Result<usize> {
-        let Some(db) = self.spacetimedb() else {
+        let Some(db) = self.state_store() else {
             return Ok(0);
         };
 
-        let records = db.list_knowledge_by_prefix(Self::FORGED_TOOL_PREFIX).await?;
+        let records = db
+            .list_knowledge_by_prefix(Self::FORGED_TOOL_PREFIX)
+            .await?;
         let mut restored = 0usize;
         for record in records {
             let manifest = serde_json::from_str::<ForgedMcpToolManifest>(&record.value)?;
@@ -384,7 +398,9 @@ impl ToolRegistry {
     }
 
     pub fn hydrate_manifest(&self, manifest: ForgedMcpToolManifest) {
-        if manifest.status != CapabilityStatus::Deprecated && manifest.status != CapabilityStatus::RolledBack {
+        if manifest.status != CapabilityStatus::Deprecated
+            && manifest.status != CapabilityStatus::RolledBack
+        {
             let tool = Arc::new(cli_forge::ForgedMcpTool::new(
                 manifest.registered_tool_name.clone(),
                 manifest.clone(),
@@ -394,7 +410,10 @@ impl ToolRegistry {
         self.register_manifest(manifest);
     }
 
-    pub async fn upsert_governed_manifest(&self, mut manifest: ForgedMcpToolManifest) -> Result<()> {
+    pub async fn upsert_governed_manifest(
+        &self,
+        mut manifest: ForgedMcpToolManifest,
+    ) -> Result<()> {
         if manifest.lineage_key.is_empty() {
             manifest.lineage_key = manifest.capability_id.clone();
         }
@@ -426,7 +445,10 @@ impl ToolRegistry {
         self.persist_manifest(&manifest).await
     }
 
-    pub async fn verify_capability(&self, tool_name: &str) -> Result<Option<ForgedMcpToolManifest>> {
+    pub async fn verify_capability(
+        &self,
+        tool_name: &str,
+    ) -> Result<Option<ForgedMcpToolManifest>> {
         let Some(mut manifest) = self.manifests.read().get(tool_name).cloned() else {
             return Ok(None);
         };
@@ -456,7 +478,11 @@ impl ToolRegistry {
         Ok(Some(manifest))
     }
 
-    pub async fn deprecate_capability(&self, tool_name: &str, health_score: f32) -> Result<Option<ForgedMcpToolManifest>> {
+    pub async fn deprecate_capability(
+        &self,
+        tool_name: &str,
+        health_score: f32,
+    ) -> Result<Option<ForgedMcpToolManifest>> {
         let Some(mut manifest) = self.manifests.read().get(tool_name).cloned() else {
             return Ok(None);
         };
@@ -469,14 +495,20 @@ impl ToolRegistry {
         Ok(Some(manifest))
     }
 
-    pub async fn rollback_capability(&self, tool_name: &str) -> Result<Option<ForgedMcpToolManifest>> {
+    pub async fn rollback_capability(
+        &self,
+        tool_name: &str,
+    ) -> Result<Option<ForgedMcpToolManifest>> {
         let Some(current) = self.manifests.read().get(tool_name).cloned() else {
             return Ok(None);
         };
         let previous = self
             .manifests()
             .into_iter()
-            .filter(|manifest| manifest.lineage_key == current.lineage_key && manifest.version + 1 == current.version)
+            .filter(|manifest| {
+                manifest.lineage_key == current.lineage_key
+                    && manifest.version + 1 == current.version
+            })
             .max_by_key(|manifest| manifest.version);
         let Some(mut previous) = previous else {
             return Ok(None);
@@ -511,6 +543,15 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, name: &str, arguments: &str) -> Result<ToolResult> {
+        self.execute_with_context(name, arguments, None).await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&SignalContext>,
+    ) -> Result<ToolResult> {
         if let Some(manifest) = self.manifests.read().get(name).cloned() {
             if !manifest.is_executable() {
                 bail!(
@@ -533,6 +574,7 @@ impl ToolRegistry {
         let tool = self
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
+        let _ = context;
         tool.execute(arguments).await
     }
 
@@ -544,24 +586,24 @@ impl ToolRegistry {
 
         for action in actions {
             let (succeeded, details) = match action {
-                ExecutionStep::ApplyPatch { target, summary } => (
-                    true,
-                    format!("Prepared patch for {target}: {summary}"),
-                ),
-                ExecutionStep::RunCommand { command, timeout_secs } => (
+                ExecutionStep::ApplyPatch { target, summary } => {
+                    (true, format!("Prepared patch for {target}: {summary}"))
+                }
+                ExecutionStep::RunCommand {
+                    command,
+                    timeout_secs,
+                } => (
                     true,
                     format!("Scheduled run `{command}` with timeout {timeout_secs}s"),
                 ),
-                ExecutionStep::ParseMetrics { source } => (
-                    true,
-                    format!("Parsed immutable metrics from {source}"),
-                ),
+                ExecutionStep::ParseMetrics { source } => {
+                    (true, format!("Parsed immutable metrics from {source}"))
+                }
                 ExecutionStep::Keep => (true, "Iteration marked as keep".into()),
                 ExecutionStep::Discard => (true, "Iteration marked as discard".into()),
-                ExecutionStep::Rollback { reason } => (
-                    true,
-                    format!("Rollback requested: {reason}"),
-                ),
+                ExecutionStep::Rollback { reason } => {
+                    (true, format!("Rollback requested: {reason}"))
+                }
             };
 
             results.push(ExecutionStepResult {
@@ -595,6 +637,130 @@ impl ToolRegistry {
     }
 }
 
+#[derive(Debug)]
+pub struct ReadFileTool;
+
+#[async_trait]
+impl Tool for ReadFileTool {
+    fn name(&self) -> &str {
+        "read_file"
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<ToolResult> {
+        let path = parse_path_argument(arguments)?;
+        let body = std::fs::read_to_string(&path)?;
+        Ok(ToolResult {
+            name: self.name().to_string(),
+            content: serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "size_bytes": body.as_bytes().len(),
+                "content": body,
+            }))?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct WriteFileTool;
+
+#[async_trait]
+impl Tool for WriteFileTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    async fn execute(&self, arguments: &str) -> Result<ToolResult> {
+        let (path, content, append) = parse_write_arguments(arguments)?;
+        let file_path = std::path::Path::new(&path);
+        if let Some(parent) = file_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        if append {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(file_path)?;
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+        } else {
+            std::fs::write(file_path, content.as_bytes())?;
+        }
+
+        let bytes = std::fs::read(file_path)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let hash = format!("{:x}", hasher.finalize());
+
+        Ok(ToolResult {
+            name: self.name().to_string(),
+            content: serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "size_bytes": bytes.len(),
+                "sha256": hash,
+                "append": append,
+                "created": !append,
+            }))?,
+        })
+    }
+}
+
+fn parse_path_argument(arguments: &str) -> Result<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+        if let Some(path) = extract_path_field(&value) {
+            return Ok(path);
+        }
+    }
+
+    let trimmed = arguments.trim().trim_matches('"').trim_matches('\'');
+    if trimmed.is_empty() {
+        bail!("read_file requires a non-empty path argument");
+    }
+    Ok(trimmed.to_string())
+}
+
+fn parse_write_arguments(arguments: &str) -> Result<(String, String, bool)> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+        if let Some(path) = extract_path_field(&value) {
+            let content = value
+                .get("content")
+                .or_else(|| value.get("text"))
+                .or_else(|| value.get("body"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let append = value
+                .get("append")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            return Ok((path, content, append));
+        }
+    }
+
+    if let Some((path, content)) = arguments.split_once('\n') {
+        let path = path.trim().trim_matches('"').trim_matches('\'').to_string();
+        if !path.is_empty() {
+            return Ok((path, content.to_string(), false));
+        }
+    }
+
+    bail!("write_file expects JSON arguments with path and content")
+}
+
+fn extract_path_field(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("path")
+        .or_else(|| value.get("file_path"))
+        .or_else(|| value.get("target_path"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+}
+
 fn current_time_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -603,3 +769,4 @@ fn current_time_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+

@@ -1,11 +1,11 @@
-use std::{
+﻿use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::Result;
-use autoloop_spacetimedb_adapter::{KnowledgeRecord, SpacetimeDb};
+use autoloop_state_adapter::{KnowledgeRecord, StateStore};
 use serde::{Deserialize, Serialize};
 
 static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -32,6 +32,16 @@ pub struct SessionEventView {
     pub latest_event_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRejectView {
+    pub session_id: String,
+    pub total_rejects: usize,
+    pub by_stage: std::collections::BTreeMap<String, usize>,
+    pub by_reason: std::collections::BTreeMap<String, usize>,
+    pub latest_trace_id: Option<String>,
+    pub latest_reason: Option<String>,
+    pub latest_reject_ms: Option<u64>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactDigest {
     pub name: String,
@@ -97,7 +107,7 @@ pub struct ReplayAnalysisReport {
 }
 
 pub async fn append_event(
-    db: &SpacetimeDb,
+    db: &StateStore,
     kind: impl Into<String>,
     trace_id: impl Into<String>,
     session_id: impl Into<String>,
@@ -124,18 +134,22 @@ pub async fn append_event(
         "eventlog:{}:{}:{}",
         event.session_id, event.created_at_ms, seq
     );
-    db.upsert_json_knowledge(key, &event, "event-stream").await?;
+    db.upsert_json_knowledge(key, &event, "event-stream")
+        .await?;
     Ok(event)
 }
 
-pub async fn aggregate_session_view(db: &SpacetimeDb, session_id: &str) -> Result<SessionEventView> {
+pub async fn aggregate_session_view(
+    db: &StateStore,
+    session_id: &str,
+) -> Result<SessionEventView> {
     let records = db
         .list_knowledge_by_prefix(&format!("eventlog:{session_id}:"))
         .await?;
     Ok(build_view(session_id, &records))
 }
 
-pub async fn list_session_events(db: &SpacetimeDb, session_id: &str) -> Result<Vec<EventEnvelope>> {
+pub async fn list_session_events(db: &StateStore, session_id: &str) -> Result<Vec<EventEnvelope>> {
     let mut events = db
         .list_knowledge_by_prefix(&format!("eventlog:{session_id}:"))
         .await?
@@ -147,7 +161,7 @@ pub async fn list_session_events(db: &SpacetimeDb, session_id: &str) -> Result<V
 }
 
 pub async fn replay_trace_events(
-    db: &SpacetimeDb,
+    db: &StateStore,
     session_id: &str,
     trace_id: &str,
 ) -> Result<Vec<EventEnvelope>> {
@@ -161,7 +175,7 @@ pub async fn replay_trace_events(
 }
 
 pub async fn persist_replay_snapshot(
-    db: &SpacetimeDb,
+    db: &StateStore,
     mut snapshot: ReplaySnapshot,
 ) -> Result<ReplaySnapshot> {
     if snapshot.snapshot_id.trim().is_empty() {
@@ -183,14 +197,20 @@ pub async fn persist_replay_snapshot(
     Ok(snapshot)
 }
 
-pub async fn get_replay_snapshot(db: &SpacetimeDb, snapshot_id: &str) -> Result<Option<ReplaySnapshot>> {
+pub async fn get_replay_snapshot(
+    db: &StateStore,
+    snapshot_id: &str,
+) -> Result<Option<ReplaySnapshot>> {
     let record = db
         .get_knowledge(&format!("replay:snapshot:{snapshot_id}"))
         .await?;
     Ok(record.and_then(|item| serde_json::from_str::<ReplaySnapshot>(&item.value).ok()))
 }
 
-pub async fn list_replay_snapshots(db: &SpacetimeDb, session_id: &str) -> Result<Vec<ReplaySnapshot>> {
+pub async fn list_replay_snapshots(
+    db: &StateStore,
+    session_id: &str,
+) -> Result<Vec<ReplaySnapshot>> {
     let mut snapshots = db
         .list_knowledge_by_prefix("replay:snapshot:")
         .await?
@@ -203,16 +223,70 @@ pub async fn list_replay_snapshots(db: &SpacetimeDb, session_id: &str) -> Result
 }
 
 pub async fn persist_replay_analysis(
-    db: &SpacetimeDb,
+    db: &StateStore,
     report: &ReplayAnalysisReport,
 ) -> Result<()> {
     db.upsert_json_knowledge(
-        format!("replay:analysis:{}:{}", report.snapshot_id, report.created_at_ms),
+        format!(
+            "replay:analysis:{}:{}",
+            report.snapshot_id, report.created_at_ms
+        ),
         report,
         "replay",
     )
     .await?;
     Ok(())
+}
+
+pub async fn aggregate_policy_reject_view(
+    db: &StateStore,
+    session_id: &str,
+) -> Result<PolicyRejectView> {
+    let events = list_session_events(db, session_id).await?;
+    let mut by_stage = std::collections::BTreeMap::<String, usize>::new();
+    let mut by_reason = std::collections::BTreeMap::<String, usize>::new();
+    let mut latest_trace_id = None;
+    let mut latest_reason = None;
+    let mut latest_reject_ms = None;
+
+    for event in events
+        .into_iter()
+        .filter(|event| event.kind == "policy_reject")
+    {
+        let stage = event
+            .payload
+            .get("stage")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let reason = event
+            .payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        *by_stage.entry(stage).or_insert(0) += 1;
+        *by_reason.entry(reason.clone()).or_insert(0) += 1;
+        if latest_reject_ms
+            .map(|ms| event.created_at_ms > ms)
+            .unwrap_or(true)
+        {
+            latest_reject_ms = Some(event.created_at_ms);
+            latest_trace_id = Some(event.trace_id.clone());
+            latest_reason = Some(reason);
+        }
+    }
+
+    let total_rejects = by_reason.values().sum();
+    Ok(PolicyRejectView {
+        session_id: session_id.to_string(),
+        total_rejects,
+        by_stage,
+        by_reason,
+        latest_trace_id,
+        latest_reason,
+        latest_reject_ms,
+    })
 }
 
 pub fn digest_value(value: &serde_json::Value) -> String {
@@ -234,7 +308,10 @@ fn build_view(session_id: &str, records: &[KnowledgeRecord]) -> SessionEventView
     for record in records {
         if let Ok(event) = serde_json::from_str::<EventEnvelope>(&record.value) {
             *by_kind.entry(event.kind.clone()).or_insert(0) += 1;
-            if latest_event_ms.map(|ts| event.created_at_ms > ts).unwrap_or(true) {
+            if latest_event_ms
+                .map(|ts| event.created_at_ms > ts)
+                .unwrap_or(true)
+            {
                 latest_event_ms = Some(event.created_at_ms);
                 latest_trace_id = Some(event.trace_id.clone());
             }
@@ -260,7 +337,7 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoloop_spacetimedb_adapter::{SpacetimeBackend, SpacetimeDbConfig};
+    use autoloop_state_adapter::{StateStoreBackend, StateStoreConfig};
 
     #[test]
     fn p10_digest_value_is_stable_for_same_payload() {
@@ -276,10 +353,10 @@ mod tests {
 
     #[tokio::test]
     async fn p10_replay_snapshot_roundtrip() {
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 2,
@@ -315,7 +392,9 @@ mod tests {
             replay_input: serde_json::json!({"payload":"hello"}),
             created_at_ms: 0,
         };
-        let persisted = persist_replay_snapshot(&db, snapshot).await.expect("persist");
+        let persisted = persist_replay_snapshot(&db, snapshot)
+            .await
+            .expect("persist");
         let loaded = get_replay_snapshot(&db, &persisted.snapshot_id)
             .await
             .expect("load")
@@ -324,3 +403,4 @@ mod tests {
         assert_eq!(loaded.session_id, "session-p10");
     }
 }
+

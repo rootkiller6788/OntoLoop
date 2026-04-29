@@ -169,7 +169,11 @@ impl SelfEvolutionKernel {
                 "Self-evolution raised verifier-aligned score from {:.2} to {:.2} using {} provider-API adaptation cycles.",
                 baseline_score,
                 current_score,
-                self.horizon.min(derive_gaps(consolidation, baseline_score, target_score).len().max(1))
+                self.horizon.min(
+                    derive_gaps(consolidation, baseline_score, target_score)
+                        .len()
+                        .max(1)
+                )
             ),
         }
     }
@@ -215,7 +219,10 @@ impl SelfEvolutionKernel {
         current_score: f32,
         tasks: &[EvolutionDuelTask],
     ) -> PolicyAdaptationReport {
-        let weighted_sum: f32 = tasks.iter().map(|task| task.weight * task.expected_gain).sum();
+        let weighted_sum: f32 = tasks
+            .iter()
+            .map(|task| task.weight * task.expected_gain)
+            .sum();
         let estimated_latency_us = 720;
         let delta = (self.base_gain * weighted_sum).clamp(0.0, 0.22);
         let updated_score = (current_score + delta).clamp(0.0, 1.0);
@@ -342,7 +349,8 @@ fn project_capability_proposals(
             tool_name: proposal.tool_name.clone(),
             change_hint: proposal.change_hint.clone(),
             rationale: format!("{} | gap `{}`", proposal.rationale, gap.topic),
-            expected_lift: (proposal.priority * adaptation_report.delta_score.max(0.05)).clamp(0.0, 1.0),
+            expected_lift: (proposal.priority * adaptation_report.delta_score.max(0.05))
+                .clamp(0.0, 1.0),
         })
         .collect()
 }

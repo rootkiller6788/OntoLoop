@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use autoloop::session::{
-    audit::NoopAuditSink,
-    machine::WorkflowMachine,
-    signal::WorkflowSignal,
-    state::WorkflowState,
+    audit::NoopAuditSink, machine::WorkflowMachine, signal::WorkflowSignal, state::WorkflowState,
 };
 
 #[tokio::test]
@@ -32,7 +29,10 @@ async fn verify_rejected_loops_back_to_planned() {
         .await
         .expect("intent");
     machine
-        .apply(WorkflowSignal::PolicyApproved, Some("policy approved".into()))
+        .apply(
+            WorkflowSignal::PolicyApproved,
+            Some("policy approved".into()),
+        )
         .await
         .expect("policy approved");
     machine
@@ -44,8 +44,14 @@ async fn verify_rejected_loops_back_to_planned() {
         .await
         .expect("scheduled->executing");
     let transition = machine
-        .apply(WorkflowSignal::VerifyRejected, Some("verifier asked iteration".into()))
+        .apply(
+            WorkflowSignal::VerifyRejected,
+            Some("verifier asked iteration".into()),
+        )
         .await
         .expect("verify rejected should route back to planned");
     assert_eq!(transition.to, WorkflowState::Planned);
 }
+
+
+

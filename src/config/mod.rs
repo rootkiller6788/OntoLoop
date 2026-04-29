@@ -1,10 +1,11 @@
-use std::{
+﻿use std::{
     fs,
     path::{Path, PathBuf},
 };
 
+use crate::contracts::types::AttestationPolicy;
 use anyhow::Result;
-use autoloop_spacetimedb_adapter::{SpacetimeBackend, SpacetimeDbConfig};
+use autoloop_state_adapter::{StateStoreBackend, StateStoreConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +30,76 @@ fn default_runtime_gate_enforce_ratio() -> f32 {
     0.2
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageBackend {
+    PrimaryStore,
+    Postgres,
+}
+
+fn default_storage_backend() -> StorageBackend {
+    StorageBackend::PrimaryStore
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageMode {
+    Direct,
+    Shadow,
+    Enforced,
+}
+
+fn default_storage_mode() -> StorageMode {
+    StorageMode::Shadow
+}
+
+fn default_storage_shadow_read_preference() -> String {
+    "state_store".into()
+}
+
+fn default_storage_shadow_read_rollout_percent() -> u8 {
+    0
+}
+
+fn default_storage_shadow_write_grace_hours() -> u64 {
+    24
+}
+
+fn default_postgres_enabled() -> bool {
+    false
+}
+
+fn default_postgres_uri() -> String {
+    "postgres://postgres:postgres@localhost:5432/ontoloop".into()
+}
+
+fn default_postgres_pool_size() -> usize {
+    16
+}
+
+fn default_postgres_schema() -> String {
+    "public".into()
+}
+
+fn default_postgres_app_name() -> String {
+    "ontoloop".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyMode {
+    Off,
+    Shadow,
+    Enforced,
+}
+
+fn default_runtime_policy_mode() -> PolicyMode {
+    PolicyMode::Shadow
+}
+
+fn default_runtime_permission_mode() -> String {
+    "strict".into()
+}
 fn default_runtime_budget_enforced() -> bool {
     true
 }
@@ -45,6 +116,72 @@ fn default_runtime_quota_window_budget_micros() -> u64 {
     1_000_000
 }
 
+fn default_runtime_attestation_required() -> bool {
+    false
+}
+
+fn default_runtime_attestation_secret_env() -> String {
+    "AUTOLOOP_ATTESTATION_SECRET".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationBackend {
+    Env,
+    Remote,
+    HardwareQuote,
+    CertificateChain,
+}
+
+fn default_attestation_backend() -> AttestationBackend {
+    AttestationBackend::Env
+}
+
+fn default_runtime_attestation_token_env() -> String {
+    "AUTOLOOP_ATTESTATION_TOKEN".into()
+}
+
+fn default_runtime_trust_evidence_ledger_path() -> String {
+    "deploy/runtime/trust/evidence.log".into()
+}
+
+fn default_runtime_trust_budget_ledger_path() -> String {
+    "deploy/runtime/trust/budget.log".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustLedgerConsistencyMode {
+    BestEffort,
+    Strong,
+}
+
+fn default_trust_ledger_consistency_mode() -> TrustLedgerConsistencyMode {
+    TrustLedgerConsistencyMode::Strong
+}
+
+fn default_runtime_attestation_quote_env() -> String {
+    "AUTOLOOP_ATTESTATION_QUOTE".into()
+}
+
+fn default_runtime_attestation_cert_chain_env() -> String {
+    "AUTOLOOP_ATTESTATION_CERT_CHAIN".into()
+}
+
+fn default_runtime_attestation_policy() -> AttestationPolicy {
+    AttestationPolicy {
+        version: "v1".into(),
+        strict: true,
+        min_tcb_version: "1.0.0".into(),
+        evidence_ttl_ms: 300_000,
+        require_tenant_binding: true,
+        require_nonce: true,
+    }
+}
+fn default_runtime_attestation_cert_subject_allowlist() -> Vec<String> {
+    Vec::new()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
     pub max_parallel_agents: usize,
@@ -59,6 +196,10 @@ pub struct RuntimeConfig {
     pub gate_mode: RuntimeGateMode,
     #[serde(default = "default_runtime_gate_enforce_ratio")]
     pub gate_enforce_ratio: f32,
+    #[serde(default = "default_runtime_permission_mode")]
+    pub permission_mode: String,
+    #[serde(default = "default_runtime_policy_mode")]
+    pub policy_mode: PolicyMode,
     #[serde(default)]
     pub rollback_contract_version: Option<String>,
     #[serde(default = "default_runtime_budget_enforced")]
@@ -69,6 +210,60 @@ pub struct RuntimeConfig {
     pub quota_window_ms: u64,
     #[serde(default = "default_runtime_quota_window_budget_micros")]
     pub quota_window_budget_micros: u64,
+    #[serde(default = "default_runtime_attestation_required")]
+    pub attestation_required: bool,
+    #[serde(default = "default_runtime_attestation_secret_env")]
+    pub attestation_secret_env: String,
+    #[serde(default = "default_attestation_backend")]
+    pub attestation_backend: AttestationBackend,
+    #[serde(default)]
+    pub attestation_remote_url: Option<String>,
+    #[serde(default = "default_runtime_attestation_token_env")]
+    pub attestation_token_env: String,
+    #[serde(default = "default_runtime_trust_evidence_ledger_path")]
+    pub trust_evidence_ledger_path: String,
+    #[serde(default = "default_runtime_trust_budget_ledger_path")]
+    pub trust_budget_ledger_path: String,
+    #[serde(default = "default_trust_ledger_consistency_mode")]
+    pub trust_ledger_consistency_mode: TrustLedgerConsistencyMode,
+    #[serde(default = "default_runtime_attestation_quote_env")]
+    pub attestation_quote_env: String,
+    #[serde(default = "default_runtime_attestation_cert_chain_env")]
+    pub attestation_cert_chain_env: String,
+    #[serde(default = "default_runtime_attestation_cert_subject_allowlist")]
+    pub attestation_cert_subject_allowlist: Vec<String>,
+    #[serde(default = "default_runtime_attestation_policy")]
+    pub attestation_policy: AttestationPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresConfig {
+    #[serde(default = "default_postgres_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_postgres_uri")]
+    pub uri: String,
+    #[serde(default = "default_postgres_pool_size")]
+    pub pool_size: usize,
+    #[serde(default = "default_postgres_schema")]
+    pub schema: String,
+    #[serde(default = "default_postgres_app_name")]
+    pub app_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    #[serde(default = "default_storage_backend")]
+    pub backend: StorageBackend,
+    #[serde(default = "default_storage_mode")]
+    pub mode: StorageMode,
+    #[serde(default = "default_storage_shadow_read_preference")]
+    pub shadow_read_preference: String,
+    #[serde(default = "default_storage_shadow_read_rollout_percent")]
+    pub shadow_read_rollout_percent: u8,
+    #[serde(default = "default_storage_shadow_write_grace_hours")]
+    pub shadow_write_grace_hours: u64,
+    #[serde(default)]
+    pub postgres: PostgresConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,12 +385,102 @@ pub struct HooksConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalPipelineMode {
+    Off,
+    Shadow,
+    Enforced,
+}
+
+fn default_signal_pipeline_mode() -> SignalPipelineMode {
+    SignalPipelineMode::Shadow
+}
+
+fn default_signal_pipeline_batch_size() -> usize {
+    256
+}
+
+fn default_signal_pipeline_max_retries() -> u8 {
+    2
+}
+
+fn default_signal_pipeline_retry_backoff_ms() -> u64 {
+    25
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalPipelineConfig {
+    #[serde(default = "default_signal_pipeline_mode")]
+    pub mode: SignalPipelineMode,
+    #[serde(default = "default_signal_pipeline_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_signal_pipeline_max_retries")]
+    pub max_retries: u8,
+    #[serde(default = "default_signal_pipeline_retry_backoff_ms")]
+    pub retry_backoff_ms: u64,
+}
+
+impl Default for SignalPipelineConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_signal_pipeline_mode(),
+            batch_size: default_signal_pipeline_batch_size(),
+            max_retries: default_signal_pipeline_max_retries(),
+            retry_backoff_ms: default_signal_pipeline_retry_backoff_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObservabilityConfig {
     pub enabled: bool,
     pub route_analytics_enabled: bool,
     pub failure_forensics_enabled: bool,
     pub dashboard_enabled: bool,
     pub report_top_k: usize,
+    #[serde(default)]
+    pub signal_pipeline: SignalPipelineConfig,
+    #[serde(default)]
+    pub alert_thresholds: AlertThresholds,
+}
+
+fn default_alert_p95_latency_ms() -> f64 {
+    120_000.0
+}
+
+fn default_alert_error_rate() -> f64 {
+    0.05
+}
+
+fn default_alert_mttr_ms() -> f64 {
+    60_000.0
+}
+
+fn default_alert_open_circuit_count() -> u64 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertThresholds {
+    #[serde(default = "default_alert_p95_latency_ms")]
+    pub p95_latency_ms: f64,
+    #[serde(default = "default_alert_error_rate")]
+    pub error_rate: f64,
+    #[serde(default = "default_alert_mttr_ms")]
+    pub mttr_ms: f64,
+    #[serde(default = "default_alert_open_circuit_count")]
+    pub open_circuit_count: u64,
+}
+
+impl Default for AlertThresholds {
+    fn default() -> Self {
+        Self {
+            p95_latency_ms: default_alert_p95_latency_ms(),
+            error_rate: default_alert_error_rate(),
+            mttr_ms: default_alert_mttr_ms(),
+            open_circuit_count: default_alert_open_circuit_count(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,13 +513,102 @@ pub struct AppConfig {
     pub hooks: HooksConfig,
     pub observability: ObservabilityConfig,
     pub deployment: DeploymentConfig,
-    pub spacetimedb: SpacetimeDbConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
+    pub state_store: StateStoreConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigProfile {
+    Local,
+    Production,
+}
+
+impl ConfigProfile {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" | "dev" | "development" => Some(Self::Local),
+            "prod" | "production" => Some(Self::Production),
+            _ => None,
+        }
+    }
+
+    pub fn config_path(self) -> PathBuf {
+        match self {
+            Self::Local => PathBuf::from("deploy/config/autoloop.dev.toml"),
+            Self::Production => PathBuf::from("deploy/config/autoloop.prod.toml"),
+        }
+    }
 }
 
 impl AppConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let raw = fs::read_to_string(path)?;
-        Ok(toml::from_str(&raw)?)
+        let mut config: Self = toml::from_str(&raw)?;
+        config.normalize_profile_fields();
+        Ok(config)
+    }
+
+    pub fn load_with_profile_hint(
+        config_path: Option<&Path>,
+        profile_hint: Option<&str>,
+    ) -> Result<Self> {
+        if let Some(path) = config_path {
+            return Self::load_from_path(path);
+        }
+
+        let requested_profile = profile_hint
+            .and_then(ConfigProfile::parse)
+            .or_else(|| {
+                std::env::var("AUTOLOOP_PROFILE")
+                    .ok()
+                    .and_then(|value| ConfigProfile::parse(&value))
+            });
+        if let Some(profile) = requested_profile {
+            let path = profile.config_path();
+            if path.exists() {
+                return Self::load_from_path(&path);
+            }
+        }
+
+        for fallback in [ConfigProfile::Local, ConfigProfile::Production] {
+            let path = fallback.config_path();
+            if path.exists() {
+                return Self::load_from_path(&path);
+            }
+        }
+
+        Ok(Self::default())
+    }
+
+    fn normalize_profile_fields(&mut self) {
+        if self
+            .runtime
+            .attestation_remote_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(str::is_empty)
+        {
+            self.runtime.attestation_remote_url = None;
+        }
+        if self
+            .research
+            .browser_render_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(str::is_empty)
+        {
+            self.research.browser_render_url = None;
+        }
+        if self
+            .research
+            .self_hosted_scraper_url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(str::is_empty)
+        {
+            self.research.self_hosted_scraper_url = None;
+        }
     }
 }
 
@@ -248,7 +622,8 @@ impl Default for AppConfig {
             agent: AgentConfig {
                 max_iterations: 12,
                 memory_window: 100,
-                system_prompt: "You are AutoLoop, a lightweight autonomous assistant runtime.".into(),
+                system_prompt: "You are AutoLoop, a lightweight autonomous assistant runtime."
+                    .into(),
             },
             runtime: RuntimeConfig {
                 max_parallel_agents: 4,
@@ -261,11 +636,25 @@ impl Default for AppConfig {
                 mcp_breaker_cooldown_ms: 300_000,
                 gate_mode: RuntimeGateMode::Shadow,
                 gate_enforce_ratio: 0.2,
+                permission_mode: default_runtime_permission_mode(),
+                policy_mode: default_runtime_policy_mode(),
                 rollback_contract_version: None,
                 budget_enforced: true,
                 default_budget_micros: 5_000_000,
                 quota_window_ms: 3_600_000,
                 quota_window_budget_micros: 1_000_000,
+                attestation_required: false,
+                attestation_secret_env: "AUTOLOOP_ATTESTATION_SECRET".into(),
+                attestation_backend: AttestationBackend::Env,
+                attestation_remote_url: None,
+                attestation_token_env: "AUTOLOOP_ATTESTATION_TOKEN".into(),
+                trust_evidence_ledger_path: "deploy/runtime/trust/evidence.log".into(),
+                trust_budget_ledger_path: "deploy/runtime/trust/budget.log".into(),
+                trust_ledger_consistency_mode: TrustLedgerConsistencyMode::Strong,
+                attestation_quote_env: "AUTOLOOP_ATTESTATION_QUOTE".into(),
+                attestation_cert_chain_env: "AUTOLOOP_ATTESTATION_CERT_CHAIN".into(),
+                attestation_cert_subject_allowlist: Vec::new(),
+                attestation_policy: default_runtime_attestation_policy(),
             },
             security: SecurityConfig {
                 profile: "minimal-ironclaw".into(),
@@ -347,6 +736,8 @@ impl Default for AppConfig {
                 failure_forensics_enabled: true,
                 dashboard_enabled: true,
                 report_top_k: 8,
+                signal_pipeline: SignalPipelineConfig::default(),
+                alert_thresholds: AlertThresholds::default(),
             },
             deployment: DeploymentConfig {
                 profile: "production-ready".into(),
@@ -354,10 +745,24 @@ impl Default for AppConfig {
                 config_dir: PathBuf::from("deploy/config"),
                 backup_dir: PathBuf::from("deploy/backup"),
             },
-            spacetimedb: SpacetimeDbConfig {
+            storage: StorageConfig {
+                backend: default_storage_backend(),
+                mode: default_storage_mode(),
+                shadow_read_preference: default_storage_shadow_read_preference(),
+                shadow_read_rollout_percent: default_storage_shadow_read_rollout_percent(),
+                shadow_write_grace_hours: default_storage_shadow_write_grace_hours(),
+                postgres: PostgresConfig {
+                    enabled: default_postgres_enabled(),
+                    uri: default_postgres_uri(),
+                    pool_size: default_postgres_pool_size(),
+                    schema: default_postgres_schema(),
+                    app_name: default_postgres_app_name(),
+                },
+            },
+            state_store: StateStoreConfig {
                 enabled: true,
-                backend: SpacetimeBackend::InMemory,
-                uri: "http://spacetimedb:3000".into(),
+                backend: StateStoreBackend::InMemory,
+                uri: "http://state_store:3000".into(),
                 module_name: "autoloop_core".into(),
                 namespace: "autoloop".into(),
                 pool_size: 8,
@@ -365,3 +770,48 @@ impl Default for AppConfig {
         }
     }
 }
+
+impl Default for PostgresConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_postgres_enabled(),
+            uri: default_postgres_uri(),
+            pool_size: default_postgres_pool_size(),
+            schema: default_postgres_schema(),
+            app_name: default_postgres_app_name(),
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_storage_backend(),
+            mode: default_storage_mode(),
+            shadow_read_preference: default_storage_shadow_read_preference(),
+            shadow_read_rollout_percent: default_storage_shadow_read_rollout_percent(),
+            shadow_write_grace_hours: default_storage_shadow_write_grace_hours(),
+            postgres: PostgresConfig::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_renderer_loads_local_profile_when_requested() {
+        let config =
+            AppConfig::load_with_profile_hint(None, Some("local")).expect("load local profile");
+        assert!(
+            config.app.name.contains("ontoloop"),
+            "profile renderer should load on-disk local profile when available"
+        );
+    }
+}
+
+
+
+
+

@@ -56,6 +56,7 @@ pub struct TaskEnvelope {
     pub identity: ExecutionIdentity,
     pub payload: serde_json::Value,
     pub constraints: ConstraintSet,
+    pub trust_plan: Option<TrustExecutionPlan>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -66,6 +67,74 @@ pub struct ExecutionIdentity {
     pub lease_token: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrustExecutionPlan {
+    pub trust_level: String,
+    pub verify_identity: bool,
+    pub verify_environment: bool,
+    pub rollout_gate: String,
+    pub attestation_backend: String,
+    pub attestation_required: bool,
+    #[serde(default)]
+    pub attestation_policy_version: Option<String>,
+    pub policy_refs: Vec<String>,
+    pub budget_scope: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationPlatform {
+    Sgx,
+    SevSnp,
+    Tpm,
+    Generic,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QuoteBundle {
+    pub platform: AttestationPlatform,
+    pub quote: String,
+    pub cert_chain: Option<String>,
+    pub endorsements: Vec<String>,
+    pub tcb_version: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub tenant_binding: Option<String>,
+    pub nonce: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AttestationEvidence {
+    pub evidence_id: String,
+    pub backend: String,
+    pub quote_bundle: Option<QuoteBundle>,
+    pub remote_report: Option<serde_json::Value>,
+    pub digest: Option<String>,
+    pub source_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VerifierVerdict {
+    pub verified: bool,
+    pub reason: String,
+    pub policy_version: String,
+    pub evidence_id: Option<String>,
+    pub verifier_name: String,
+    pub min_tcb_passed: bool,
+    pub freshness_passed: bool,
+    pub tenant_binding_passed: bool,
+    pub nonce_present: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AttestationPolicy {
+    pub version: String,
+    pub strict: bool,
+    pub min_tcb_version: String,
+    pub evidence_ttl_ms: u64,
+    pub require_tenant_binding: bool,
+    pub require_nonce: bool,
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunReceipt {
     pub session_id: SessionId,

@@ -1,7 +1,7 @@
-use std::{collections::HashMap, env, process::Command, thread, time::Duration};
+﻿use std::{collections::HashMap, env, process::Command, thread, time::Duration};
 
 use anyhow::{Context, Result};
-use autoloop_spacetimedb_adapter::SpacetimeDb;
+use autoloop_state_adapter::StateStore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::warn;
@@ -224,7 +224,7 @@ impl ResearchKernel {
 
     pub async fn run_anchor_research(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         anchor_text: &str,
     ) -> Result<ResearchReport> {
@@ -251,7 +251,12 @@ impl ResearchKernel {
         let execution = self.execute_research(anchor_text, &queries).await?;
         let mut candidates = execution.candidates;
         normalize_candidates(&mut candidates);
-        let knowledge_gaps = infer_gaps(anchor_text, &candidates, &execution.artifacts, &execution.warnings);
+        let knowledge_gaps = infer_gaps(
+            anchor_text,
+            &candidates,
+            &execution.artifacts,
+            &execution.warnings,
+        );
         let autonomy_score = compute_autonomy_score(
             &queries,
             &candidates,
@@ -296,13 +301,16 @@ impl ResearchKernel {
 
     pub async fn schedule_follow_up_research(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         actor_id: &str,
         report: &ResearchReport,
     ) -> Result<usize> {
         if !db
-            .has_permission(actor_id, autoloop_spacetimedb_adapter::PermissionAction::Dispatch)
+            .has_permission(
+                actor_id,
+                autoloop_state_adapter::PermissionAction::Dispatch,
+            )
             .await?
         {
             return Ok(0);
@@ -352,8 +360,13 @@ impl ResearchKernel {
     ) -> Result<ResearchExecution> {
         match self.config.backend {
             ResearchBackend::Synthetic => Ok(self.synthetic_execution(anchor_text, queries)),
-            ResearchBackend::BrowserFetch => self.browser_fetch_execution(anchor_text, queries).await,
-            ResearchBackend::PlaywrightCli => self.playwright_cli_execution(anchor_text, queries).await,
+            ResearchBackend::BrowserFetch => {
+                self.browser_fetch_with_policy_fallback(anchor_text, queries)
+                    .await
+            }
+            ResearchBackend::PlaywrightCli => {
+                self.playwright_cli_execution(anchor_text, queries).await
+            }
             ResearchBackend::Firecrawl => self.firecrawl_execution(anchor_text, queries).await,
             ResearchBackend::SelfHostedScraper => {
                 self.self_hosted_execution(anchor_text, queries).await
@@ -361,6 +374,134 @@ impl ResearchKernel {
             ResearchBackend::WebFetch => self.web_fetch_execution(anchor_text, queries).await,
             ResearchBackend::Auto => self.auto_execution(anchor_text, queries).await,
         }
+    }
+
+    async fn browser_fetch_with_policy_fallback(
+        &self,
+        anchor_text: &str,
+        queries: &[DiscoveryQuery],
+    ) -> Result<ResearchExecution> {
+        let unavailable_reason = self.browser_fetch_unavailable_reason();
+        if let Some(reason) = unavailable_reason {
+            let mut downgraded = self
+                .fallback_execution(
+                    anchor_text,
+                    queries,
+                    Some("browser_fetch"),
+                    Some(reason.clone()),
+                )
+                .await?;
+            downgraded.warnings.insert(
+                0,
+                format!(
+                    "capability_negotiation: browser_fetch unavailable ({reason}); downgraded_to={}",
+                    downgraded.backend_used
+                ),
+            );
+            return Ok(downgraded);
+        }
+
+        match self.browser_fetch_execution(anchor_text, queries).await {
+            Ok(execution) if !execution.artifacts.is_empty() => Ok(execution),
+            Ok(_) => self
+                .fallback_execution(
+                    anchor_text,
+                    queries,
+                    Some("browser_fetch"),
+                    Some("browser-fetch returned no artifacts".to_string()),
+                )
+                .await,
+            Err(err) => self
+                .fallback_execution(
+                    anchor_text,
+                    queries,
+                    Some("browser_fetch"),
+                    Some(err.to_string()),
+                )
+                .await,
+        }
+    }
+
+    async fn fallback_execution(
+        &self,
+        anchor_text: &str,
+        queries: &[DiscoveryQuery],
+        failed_backend: Option<&str>,
+        failure_reason: Option<String>,
+    ) -> Result<ResearchExecution> {
+        let mut warnings = Vec::<String>::new();
+        if let Some(backend) = failed_backend {
+            warnings.push(format!(
+                "capability_negotiation: backend={backend} fallback_reason={}",
+                failure_reason.as_deref().unwrap_or("unspecified")
+            ));
+        }
+
+        if self.config.live_fetch_enabled {
+            match self.playwright_cli_execution(anchor_text, queries).await {
+                Ok(mut execution) if !execution.artifacts.is_empty() => {
+                    execution.warnings.splice(0..0, warnings);
+                    return Ok(execution);
+                }
+                Ok(_) => warn!("playwright-cli execution returned no artifacts during fallback"),
+                Err(err) => warn!("playwright-cli execution failed during fallback: {err:#}"),
+            }
+
+            if self.firecrawl_credentials().is_some() {
+                match self.firecrawl_execution(anchor_text, queries).await {
+                    Ok(mut execution) if !execution.artifacts.is_empty() => {
+                        execution.warnings.splice(0..0, warnings);
+                        return Ok(execution);
+                    }
+                    Ok(_) => warn!("firecrawl execution returned no artifacts during fallback"),
+                    Err(err) => warn!("firecrawl execution failed during fallback: {err:#}"),
+                }
+            }
+
+            if self.config.self_hosted_scraper_url.is_some() {
+                match self.self_hosted_execution(anchor_text, queries).await {
+                    Ok(mut execution) if !execution.artifacts.is_empty() => {
+                        execution.warnings.splice(0..0, warnings);
+                        return Ok(execution);
+                    }
+                    Ok(_) => warn!("self-hosted scrape returned no artifacts during fallback"),
+                    Err(err) => warn!("self-hosted scrape failed during fallback: {err:#}"),
+                }
+            }
+
+            match self.web_fetch_execution(anchor_text, queries).await {
+                Ok(mut execution) if !execution.artifacts.is_empty() => {
+                    execution.warnings.splice(0..0, warnings);
+                    return Ok(execution);
+                }
+                Ok(_) => warn!("web-fetch returned no artifacts during fallback"),
+                Err(err) => warn!("web-fetch failed during fallback: {err:#}"),
+            }
+        }
+
+        let mut synthetic = self.synthetic_execution(anchor_text, queries);
+        synthetic.warnings.splice(0..0, warnings);
+        Ok(synthetic)
+    }
+
+    fn browser_fetch_unavailable_reason(&self) -> Option<String> {
+        if !self.config.live_fetch_enabled {
+            return Some("live_fetch_disabled".into());
+        }
+        if self
+            .config
+            .browser_render_url
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true)
+        {
+            return Some("missing_browser_render_url".into());
+        }
+        if !command_available(curl_binary(), "--version") {
+            return Some("curl_not_available".into());
+        }
+        None
     }
 
     async fn auto_execution(
@@ -402,14 +543,7 @@ impl ResearchKernel {
             }
         }
 
-        match self.web_fetch_execution(anchor_text, queries).await {
-            Ok(execution) if !execution.artifacts.is_empty() => Ok(execution),
-            Ok(_) => Ok(self.synthetic_execution(anchor_text, queries)),
-            Err(err) => {
-                warn!("web-fetch backend failed: {err:#}");
-                Ok(self.synthetic_execution(anchor_text, queries))
-            }
-        }
+        self.fallback_execution(anchor_text, queries, None, None).await
     }
 
     async fn browser_fetch_execution(
@@ -440,8 +574,12 @@ impl ResearchKernel {
             .enumerate()
         {
             let session = self.browser_session(index);
-            let Some(proxy) = self.reserve_proxy(&mut governance, candidate.url.as_str(), index) else {
-                warnings.push(format!("proxy governance blocked browser render for {}", candidate.url));
+            let Some(proxy) = self.reserve_proxy(&mut governance, candidate.url.as_str(), index)
+            else {
+                warnings.push(format!(
+                    "proxy governance blocked browser render for {}",
+                    candidate.url
+                ));
                 continue;
             };
             let body = json!({
@@ -462,21 +600,24 @@ impl ResearchKernel {
                     if let Some(warning) = response.warning {
                         warnings.push(warning);
                     }
-                    let data = response.data.context("browser render response missing data")?;
+                    let data = response
+                        .data
+                        .context("browser render response missing data")?;
                     let markdown = data
                         .markdown
                         .or_else(|| data.content.clone())
                         .or_else(|| data.html.as_ref().map(|html| html_to_markdownish(html)))
                         .unwrap_or_default();
                     if markdown.trim().is_empty() {
-                        warnings.push(format!("browser renderer returned empty body for {}", candidate.url));
+                        warnings.push(format!(
+                            "browser renderer returned empty body for {}",
+                            candidate.url
+                        ));
                         continue;
                     }
                     artifacts.push(ResearchArtifact {
                         url: data.url.unwrap_or_else(|| candidate.url.clone()),
-                        title: data
-                            .title
-                            .unwrap_or_else(|| summarize_url(&candidate.url)),
+                        title: data.title.unwrap_or_else(|| summarize_url(&candidate.url)),
                         extracted_summary: summarize_text(&markdown, 280),
                         markdown,
                         discovered_at_ms: crate::orchestration::current_time_ms(),
@@ -492,7 +633,10 @@ impl ResearchKernel {
                 }
                 Err(err) => {
                     governance.record_failure(Some(&proxy));
-                    warnings.push(format!("browser render failed for {}: {err:#}", candidate.url));
+                    warnings.push(format!(
+                        "browser render failed for {}: {err:#}",
+                        candidate.url
+                    ));
                 }
             }
         }
@@ -506,8 +650,10 @@ impl ResearchKernel {
             artifacts,
             warnings,
             used_proxies: governance.used_proxies(),
-            exhausted_proxies: governance.exhausted_proxies(self.config.proxy_request_quota_per_proxy),
-            open_circuit_proxies: governance.open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
+            exhausted_proxies: governance
+                .exhausted_proxies(self.config.proxy_request_quota_per_proxy),
+            open_circuit_proxies: governance
+                .open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
         })
     }
 
@@ -551,8 +697,10 @@ impl ResearchKernel {
             artifacts,
             warnings,
             used_proxies: governance.used_proxies(),
-            exhausted_proxies: governance.exhausted_proxies(self.config.proxy_request_quota_per_proxy),
-            open_circuit_proxies: governance.open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
+            exhausted_proxies: governance
+                .exhausted_proxies(self.config.proxy_request_quota_per_proxy),
+            open_circuit_proxies: governance
+                .open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
         })
     }
 
@@ -611,10 +759,7 @@ impl ResearchKernel {
                             ),
                             relevance: 0.86,
                             trust_score: 0.74,
-                            selected_reason: format!(
-                                "firecrawl search hit for `{}`",
-                                query.query
-                            ),
+                            selected_reason: format!("firecrawl search hit for `{}`", query.query),
                         });
                     }
                     FirecrawlSearchResultOrDocument::Document(doc) => {
@@ -661,10 +806,7 @@ impl ResearchKernel {
 
         normalize_candidates(&mut candidates);
         if artifacts.is_empty() {
-            for candidate in candidates
-                .iter()
-                .take(self.config.max_candidates_per_query)
-            {
+            for candidate in candidates.iter().take(self.config.max_candidates_per_query) {
                 if let Ok(artifact) = self.firecrawl_scrape(candidate).await {
                     artifacts.push(artifact);
                 }
@@ -679,8 +821,10 @@ impl ResearchKernel {
             artifacts,
             warnings,
             used_proxies: governance.used_proxies(),
-            exhausted_proxies: governance.exhausted_proxies(self.config.proxy_request_quota_per_proxy),
-            open_circuit_proxies: governance.open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
+            exhausted_proxies: governance
+                .exhausted_proxies(self.config.proxy_request_quota_per_proxy),
+            open_circuit_proxies: governance
+                .open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
         })
     }
 
@@ -749,7 +893,10 @@ impl ResearchKernel {
         let mut governance = ProxyGovernanceState::default();
         for candidate in candidates.iter().take(self.config.max_candidates_per_query) {
             let Some(proxy) = self.reserve_proxy(&mut governance, candidate.url.as_str(), 0) else {
-                warnings.push(format!("proxy governance blocked self-hosted scrape for {}", candidate.url));
+                warnings.push(format!(
+                    "proxy governance blocked self-hosted scrape for {}",
+                    candidate.url
+                ));
                 continue;
             };
             let body = json!({
@@ -768,11 +915,12 @@ impl ResearchKernel {
                         .markdown
                         .or_else(|| response.content.clone())
                         .or_else(|| {
-                            response.data.as_ref().and_then(|data| data.markdown.clone())
+                            response
+                                .data
+                                .as_ref()
+                                .and_then(|data| data.markdown.clone())
                         })
-                        .or_else(|| {
-                            response.data.as_ref().and_then(|data| data.content.clone())
-                        })
+                        .or_else(|| response.data.as_ref().and_then(|data| data.content.clone()))
                         .unwrap_or_default();
                     if markdown.trim().is_empty() {
                         warnings.push(format!(
@@ -787,9 +935,7 @@ impl ResearchKernel {
                         .unwrap_or_else(|| candidate.url.clone());
                     let title = response
                         .title
-                        .or_else(|| {
-                            response.data.as_ref().and_then(|data| data.title.clone())
-                        })
+                        .or_else(|| response.data.as_ref().and_then(|data| data.title.clone()))
                         .unwrap_or_else(|| summarize_url(&url));
                     if response.success == Some(false) {
                         warnings.push(format!(
@@ -809,7 +955,10 @@ impl ResearchKernel {
                 }
                 Err(err) => {
                     governance.record_failure(Some(&proxy));
-                    warnings.push(format!("self-hosted scrape failed for {}: {err:#}", candidate.url));
+                    warnings.push(format!(
+                        "self-hosted scrape failed for {}: {err:#}",
+                        candidate.url
+                    ));
                 }
             }
         }
@@ -823,8 +972,10 @@ impl ResearchKernel {
             artifacts,
             warnings,
             used_proxies: governance.used_proxies(),
-            exhausted_proxies: governance.exhausted_proxies(self.config.proxy_request_quota_per_proxy),
-            open_circuit_proxies: governance.open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
+            exhausted_proxies: governance
+                .exhausted_proxies(self.config.proxy_request_quota_per_proxy),
+            open_circuit_proxies: governance
+                .open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
         })
     }
 
@@ -848,7 +999,9 @@ impl ResearchKernel {
         for candidate in candidates.iter().take(self.config.max_candidates_per_query) {
             match self.web_fetch_artifact(candidate, &mut governance) {
                 Ok(artifact) => artifacts.push(artifact),
-                Err(err) => warnings.push(format!("web fetch failed for {}: {err:#}", candidate.url)),
+                Err(err) => {
+                    warnings.push(format!("web fetch failed for {}: {err:#}", candidate.url))
+                }
             }
         }
 
@@ -861,8 +1014,10 @@ impl ResearchKernel {
             artifacts,
             warnings,
             used_proxies: governance.used_proxies(),
-            exhausted_proxies: governance.exhausted_proxies(self.config.proxy_request_quota_per_proxy),
-            open_circuit_proxies: governance.open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
+            exhausted_proxies: governance
+                .exhausted_proxies(self.config.proxy_request_quota_per_proxy),
+            open_circuit_proxies: governance
+                .open_circuit_proxies(self.config.proxy_breaker_failure_threshold),
         })
     }
 
@@ -898,7 +1053,7 @@ impl ResearchKernel {
 
     async fn persist_report(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         report: &ResearchReport,
     ) -> Result<()> {
@@ -936,17 +1091,14 @@ impl ResearchKernel {
             exhausted_proxies: report.exhausted_proxies.clone(),
             open_circuit_proxies: report.open_circuit_proxies.clone(),
             warning_samples: report.backend_warnings.iter().take(5).cloned().collect(),
-            likely_proxy_pressure: report
-                .backend_warnings
-                .iter()
-                .any(|warning| {
-                    let lowered = warning.to_ascii_lowercase();
-                    lowered.contains("403")
-                        || lowered.contains("429")
-                        || lowered.contains("timeout")
-                        || lowered.contains("captcha")
-                        || lowered.contains("blocked")
-                }),
+            likely_proxy_pressure: report.backend_warnings.iter().any(|warning| {
+                let lowered = warning.to_ascii_lowercase();
+                lowered.contains("403")
+                    || lowered.contains("429")
+                    || lowered.contains("timeout")
+                    || lowered.contains("captcha")
+                    || lowered.contains("blocked")
+            }),
         };
         db.upsert_json_knowledge(
             format!("research:{session_id}:proxy-forensics"),
@@ -1217,20 +1369,12 @@ const [url, userAgent, timeoutMs, proxy, antiBot] = process.argv.slice(2);
         index: usize,
     ) -> Option<String> {
         let proxy = self.select_proxy(index, seed)?;
-        if governance
-            .usage_counts
-            .get(&proxy)
-            .copied()
-            .unwrap_or(0)
+        if governance.usage_counts.get(&proxy).copied().unwrap_or(0)
             >= self.config.proxy_request_quota_per_proxy
         {
             return None;
         }
-        if governance
-            .failure_counts
-            .get(&proxy)
-            .copied()
-            .unwrap_or(0)
+        if governance.failure_counts.get(&proxy).copied().unwrap_or(0)
             >= self.config.proxy_breaker_failure_threshold
         {
             return None;
@@ -1244,7 +1388,9 @@ const [url, userAgent, timeoutMs, proxy, antiBot] = process.argv.slice(2);
             return None;
         }
         let offset = if self.config.rotate_proxy_per_request {
-            seed.bytes().fold(0usize, |acc, byte| acc.wrapping_add(byte as usize)) + index
+            seed.bytes()
+                .fold(0usize, |acc, byte| acc.wrapping_add(byte as usize))
+                + index
         } else {
             0
         };
@@ -1347,7 +1493,7 @@ fn discover_candidates(
 ) -> Vec<ResearchCandidate> {
     let lowered_anchor = anchor_text.to_ascii_lowercase();
     let is_policy = lowered_anchor.contains("policy")
-        || lowered_anchor.contains("鏀跨瓥")
+        || anchor_text.contains("\u{653f}\u{7b56}")
         || lowered_anchor.contains("regulation")
         || lowered_anchor.contains("compliance");
     let is_docs = lowered_anchor.contains("api")
@@ -1442,8 +1588,8 @@ fn normalize_candidates(candidates: &mut Vec<ResearchCandidate>) {
             .then_with(|| {
                 right
                     .relevance
-            .partial_cmp(&left.relevance)
-            .unwrap_or(std::cmp::Ordering::Equal)
+                    .partial_cmp(&left.relevance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .then_with(|| left.url.cmp(&right.url))
     });
@@ -1505,7 +1651,11 @@ fn synthesize_artifact(
         title,
         markdown: format!(
             "# {}\n\n{}\n\n- source_kind: {:?}\n- relevance: {:.2}\n- reason: {}",
-            anchor_text, summary, candidate.source_kind, candidate.relevance, candidate.selected_reason
+            anchor_text,
+            summary,
+            candidate.source_kind,
+            candidate.relevance,
+            candidate.selected_reason
         ),
         extracted_summary: summary,
         discovered_at_ms: crate::orchestration::current_time_ms(),
@@ -1590,9 +1740,9 @@ fn looks_like_regional_policy_query(text: &str) -> bool {
     lowered.contains("policy")
         || lowered.contains("regulation")
         || lowered.contains("compliance")
-        || text.contains("政策")
-        || text.contains("补贴")
-        || text.contains("合规")
+        || text.contains("\u{653f}\u{7b56}")
+        || text.contains("\u{8865}\u{8d34}")
+        || text.contains("\u{5408}\u{89c4}")
 }
 
 fn looks_like_docs_query(text: &str) -> bool {
@@ -1601,7 +1751,7 @@ fn looks_like_docs_query(text: &str) -> bool {
         || lowered.contains("sdk")
         || lowered.contains("rust")
         || lowered.contains("docs")
-        || text.contains("文档")
+        || text.contains("\u{6587}\u{6863}")
 }
 
 fn maybe_enable_dynamic_render(url: &str) -> String {
@@ -1647,10 +1797,7 @@ fn classify_source_kind(signal: &str) -> ResearchSourceKind {
         } else {
             ResearchSourceKind::Official
         }
-    } else if lowered.contains("blog")
-        || lowered.contains("news")
-        || lowered.contains("update")
-    {
+    } else if lowered.contains("blog") || lowered.contains("news") || lowered.contains("update") {
         ResearchSourceKind::News
     } else if lowered.contains("github") || lowered.contains("community") {
         ResearchSourceKind::Community
@@ -1716,7 +1863,7 @@ fn html_to_markdownish(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoloop_spacetimedb_adapter::{SpacetimeBackend, SpacetimeDbConfig};
+    use autoloop_state_adapter::{StateStoreBackend, StateStoreConfig};
 
     fn test_config() -> ResearchConfig {
         ResearchConfig {
@@ -1750,10 +1897,10 @@ mod tests {
 
     #[tokio::test]
     async fn research_kernel_persists_anchor_report_and_artifacts() {
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -1761,7 +1908,11 @@ mod tests {
         let kernel = ResearchKernel::from_config(&test_config());
 
         let report = kernel
-            .run_anchor_research(&db, "session-research", "2024 中国新能源补贴政策 official updates")
+            .run_anchor_research(
+                &db,
+                "session-research",
+                "2024 涓浗鏂拌兘婧愯ˉ璐存斂绛?official updates",
+            )
             .await
             .expect("research");
 
@@ -1775,6 +1926,33 @@ mod tests {
         assert!(!report.artifacts.is_empty());
         assert_eq!(report.backend_used, "synthetic");
         assert!(stored.value.contains("autonomy_score"));
+    }
+
+    #[tokio::test]
+    async fn browser_fetch_unavailable_negotiates_to_policy_fallback() {
+        let db = StateStore::from_config(&StateStoreConfig {
+            enabled: true,
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
+            module_name: "autoloop_core".into(),
+            namespace: "autoloop".into(),
+            pool_size: 4,
+        });
+        let mut config = test_config();
+        config.backend = ResearchBackend::BrowserFetch;
+        config.live_fetch_enabled = false;
+        config.browser_render_url = None;
+        let kernel = ResearchKernel::from_config(&config);
+
+        let report = kernel
+            .run_anchor_research(&db, "session-research-browser-fallback", "Rust async sdk docs")
+            .await
+            .expect("browser fallback research");
+
+        assert_eq!(report.backend_used, "synthetic");
+        assert!(report.backend_warnings.iter().any(|warning| {
+            warning.contains("capability_negotiation") && warning.contains("browser_fetch")
+        }));
     }
 
     #[test]
@@ -1846,3 +2024,4 @@ mod tests {
         assert_eq!(health.proxy_pool_size, 1);
     }
 }
+

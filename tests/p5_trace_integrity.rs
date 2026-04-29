@@ -1,14 +1,14 @@
 use autoloop::observability::event_stream::{
     aggregate_session_view, append_event, list_session_events, replay_trace_events,
 };
-use autoloop::spacetimedb_adapter::{SpacetimeBackend, SpacetimeDb, SpacetimeDbConfig};
+use autoloop::state_store_adapter::{StateStoreBackend, StateStore, StateStoreConfig};
 
 #[tokio::test]
 async fn sampled_trace_chain_is_replayable_and_ordered() {
-    let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+    let db = StateStore::from_config(&StateStoreConfig {
         enabled: true,
-        backend: SpacetimeBackend::InMemory,
-        uri: "http://spacetimedb:3000".into(),
+        backend: StateStoreBackend::InMemory,
+        uri: "http://state_store:3000".into(),
         module_name: "autoloop_core".into(),
         namespace: "autoloop".into(),
         pool_size: 4,
@@ -71,3 +71,7 @@ async fn sampled_trace_chain_is_replayable_and_ordered() {
     assert_eq!(view.total_events, events.len());
     assert!(view.by_kind.get("task_runs").copied().unwrap_or(0) >= 5);
 }
+
+
+
+

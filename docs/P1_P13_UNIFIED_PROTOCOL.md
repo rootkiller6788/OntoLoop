@@ -1,4 +1,4 @@
-# P1-P13 Unified Specification Protocol (v1)
+﻿# P1-P13 Unified Specification Protocol (v1)
 
 This protocol standardizes how AutoLoop phases `P1` through `P13` are described, reviewed, implemented, and reported by AI agents.
 
@@ -47,7 +47,7 @@ Every AI output for a phase MUST follow this structure:
   "module_scope": {
     "write_modules": ["src/security", "src/runtime"],
     "read_modules": ["src/session", "src/contracts"],
-    "external_surfaces": ["CLI", "dashboard", "spacetimedb adapter"]
+    "external_surfaces": ["CLI", "dashboard", "state_store adapter"]
   },
   "data_models": [
     {
@@ -119,7 +119,7 @@ Do not add political metaphors or non-technical labels.
 |---|---|---|---|
 | P1 | State machine lock | `src/session`, `src/orchestration` | legal transitions only + reject/revise loops |
 | P2 | Runtime guard mandatory | `src/runtime`, `src/tools`, `src/providers` | all execution through unified gate |
-| P3 | Traceable append-only events | `src/observability`, `adapter`, `spacetimedb` | replayable chain with full IDs |
+| P3 | Traceable append-only events | `src/observability`, `adapter`, `state_store` | replayable chain with full IDs |
 | P4 | 8-layer implementation alignment | `src/lib.rs` + layer modules | each layer has explicit interface mapping |
 | P5 | Integration and escape tests | `tests/` | no runtime bypass + stable matrix |
 | P6 | Gray rollout | `deploy/config`, `cli system` | shadow/canary/full/rollback operable |
@@ -275,3 +275,4 @@ Mapped to phases:
 6. Learning gate decides promotion or rollback (`P12`).
 7. Business reports update margin/SLA/risk and close loop (`P13`).
 8. Next cycle starts with updated memory, capability posture, and rollout policy (`P6`).
+

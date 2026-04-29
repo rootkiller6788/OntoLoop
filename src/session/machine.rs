@@ -43,9 +43,14 @@ impl WorkflowMachine {
     ) -> Result<StateTransition, TransitionError> {
         // Verification is modeled as a real state hop: Executing -> Verifying -> (Closed|Planned).
         if self.state == WorkflowState::Executing
-            && matches!(signal, WorkflowSignal::VerifyPassed | WorkflowSignal::VerifyRejected)
+            && matches!(
+                signal,
+                WorkflowSignal::VerifyPassed | WorkflowSignal::VerifyRejected
+            )
         {
-            let verify_hop = self.apply_single(WorkflowState::Verifying, signal, None).await?;
+            let verify_hop = self
+                .apply_single(WorkflowState::Verifying, signal, None)
+                .await?;
             let target = next_state(WorkflowState::Verifying, signal)?;
             let final_step = self.apply_single(target, signal, reason).await?;
             return Ok(StateTransition {

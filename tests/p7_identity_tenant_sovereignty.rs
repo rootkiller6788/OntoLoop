@@ -6,18 +6,18 @@ use autoloop::{
     },
     providers::ProviderRegistry,
     runtime::RuntimeKernel,
-    spacetimedb_adapter::{
-        PolicyBinding, Principal, RoleBinding, SessionLease, SpacetimeBackend, SpacetimeDb,
-        SpacetimeDbConfig, Tenant,
+    state_store_adapter::{
+        PolicyBinding, Principal, RoleBinding, SessionLease, StateStoreBackend, StateStore,
+        StateStoreConfig, Tenant,
     },
     tools::ToolRegistry,
 };
 
-fn db() -> SpacetimeDb {
-    SpacetimeDb::from_config(&SpacetimeDbConfig {
+fn db() -> StateStore {
+    StateStore::from_config(&StateStoreConfig {
         enabled: true,
-        backend: SpacetimeBackend::InMemory,
-        uri: "http://spacetimedb:3000".into(),
+        backend: StateStoreBackend::InMemory,
+        uri: "http://state_store:3000".into(),
         module_name: "autoloop_core".into(),
         namespace: "autoloop".into(),
         pool_size: 4,
@@ -53,11 +53,12 @@ fn base_envelope(session_id: &str, capability: &str, identity: ExecutionIdentity
             sandbox_profile: "standard".into(),
             requires_human_approval: false,
         },
+        trust_plan: None,
     }
 }
 
 async fn seed_identity(
-    db: &SpacetimeDb,
+    db: &StateStore,
     session_id: &str,
     tenant_id: &str,
     principal_id: &str,
@@ -260,7 +261,10 @@ async fn p7_least_privilege_allows_read_and_denies_write() {
             None,
         )
         .await;
-    assert!(read_result.is_ok(), "least privilege should allow read capability");
+    assert!(
+        read_result.is_ok(),
+        "least privilege should allow read capability"
+    );
 
     let write_error = runtime
         .execute(
@@ -274,7 +278,13 @@ async fn p7_least_privilege_allows_read_and_denies_write() {
         )
         .await
         .expect_err("write capability should be blocked by policy prefixes");
-    assert!(write_error
-        .to_string()
-        .contains("capability not allowed by policy"));
+    assert!(
+        write_error
+            .to_string()
+            .contains("capability not allowed by policy")
+    );
 }
+
+
+
+

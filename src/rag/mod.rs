@@ -1,18 +1,30 @@
-mod graph_core;
+﻿mod graph_core;
 mod model;
+mod org_knowledge;
+mod org_sharing_gate;
 mod retrieval;
 
 pub use graph_core::{GraphModule, ReducerContext, heuristic_extract_chunk_graph, normalize_key};
+pub use org_knowledge::{
+    OrgKnowledgePublisher, OrgKnowledgeSnapshot, SharedKnowledgePortAdapter, SharedKnowledgeUpdate,
+};
+pub use org_sharing_gate::{
+    OrgSharingGateDecision, OrgSharingGateInput, evaluate as evaluate_org_sharing_gate,
+};
+
 pub use model::{
     CommunityRecord, DatabaseSnapshot, DocumentRecord, DocumentStatus, EntityRecord, QueryContext,
     QueryMode, RelationshipRecord,
 };
 
-use anyhow::{Result, bail};
 use crate::tools::ForgedMcpToolManifest;
+use anyhow::{Result, bail};
 use serde::Serialize;
 
-use crate::{config::RagConfig, orchestration::{ExecutionReport, SwarmTask, ValidationReport}};
+use crate::{
+    config::RagConfig,
+    orchestration::{ExecutionReport, SwarmTask, ValidationReport},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RagStrategy {
@@ -97,7 +109,7 @@ impl RagSubsystem {
         let ingest = module.ingest_document_with_heuristics(
             &ctx,
             format!("session-{session_id}-knowledge"),
-            format!("spacetimedb://knowledge/{session_id}"),
+            format!("state_store://knowledge/{session_id}"),
             corpus,
             64,
             12,
@@ -105,7 +117,8 @@ impl RagSubsystem {
 
         let local = module.joint_query_context(ingest.document_id, request, 4, 6, 3);
         let global = module.global_query_context(ingest.document_id, ceo_summary, 3);
-        let snapshot_json = serde_json::to_string(&module.snapshot()).unwrap_or_else(|_| "{}".into());
+        let snapshot_json =
+            serde_json::to_string(&module.snapshot()).unwrap_or_else(|_| "{}".into());
 
         GraphKnowledgeUpdate {
             document_id: ingest.document_id,
@@ -146,7 +159,10 @@ impl RagSubsystem {
             .filter(|entity| {
                 entity.entity_type == "Capability"
                     || entity.normalized_name.contains("mcp")
-                    || entity.description.to_ascii_lowercase().contains("forged capability")
+                    || entity
+                        .description
+                        .to_ascii_lowercase()
+                        .contains("forged capability")
             })
             .map(|entity| entity.canonical_name.to_ascii_lowercase())
             .collect::<Vec<_>>();
@@ -205,8 +221,20 @@ impl RagSubsystem {
             return snapshot_json.to_string();
         }
 
-        let document_id = snapshot.documents.iter().map(|doc| doc.id).max().unwrap_or(0) + 1;
-        let mut next_entity_id = snapshot.entities.iter().map(|entity| entity.id).max().unwrap_or(0) + 1;
+        let document_id = snapshot
+            .documents
+            .iter()
+            .map(|doc| doc.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let mut next_entity_id = snapshot
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
         let mut next_relationship_id = snapshot
             .relationships
             .iter()
@@ -225,7 +253,10 @@ impl RagSubsystem {
         snapshot.documents.push(DocumentRecord {
             id: document_id,
             title: "forged-capability-catalog".into(),
-            source_uri: format!("spacetimedb://knowledge/forged-capabilities/{}", manifests.len()),
+            source_uri: format!(
+                "state_store://knowledge/forged-capabilities/{}",
+                manifests.len()
+            ),
             raw_text: manifests
                 .iter()
                 .map(|manifest| format!("{} {}", manifest.registered_tool_name, manifest.purpose))
@@ -257,7 +288,10 @@ impl RagSubsystem {
                 document_id,
                 manifest.registered_tool_name.clone(),
                 "Capability".into(),
-                format!("Forged capability for {} via {}", manifest.purpose, manifest.server),
+                format!(
+                    "Forged capability for {} via {}",
+                    manifest.purpose, manifest.server
+                ),
             );
             let server_entity_id = upsert_entity(
                 &mut snapshot.entities,
@@ -265,7 +299,10 @@ impl RagSubsystem {
                 document_id,
                 format!("MCP Server {}", manifest.server),
                 "Platform".into(),
-                format!("Execution surface for forged capability {}", manifest.server),
+                format!(
+                    "Execution surface for forged capability {}",
+                    manifest.server
+                ),
             );
 
             community_members.push(capability_entity_id);
@@ -316,7 +353,11 @@ impl RagSubsystem {
             ),
         });
 
-        if let Some(document) = snapshot.documents.iter_mut().find(|document| document.id == document_id) {
+        if let Some(document) = snapshot
+            .documents
+            .iter_mut()
+            .find(|document| document.id == document_id)
+        {
             document.entity_count = community_members.len() as u32;
             document.relationship_count = community_relationships.len() as u32;
         }
@@ -332,30 +373,38 @@ impl RagSubsystem {
         manifests: &[ForgedMcpToolManifest],
     ) -> String {
         let Some(existing_snapshot_json) = existing_snapshot_json else {
-            return self.augment_snapshot_with_task_capabilities(new_snapshot_json, tasks, manifests);
+            return self.augment_snapshot_with_task_capabilities(
+                new_snapshot_json,
+                tasks,
+                manifests,
+            );
         };
         let existing = serde_json::from_str::<DatabaseSnapshot>(existing_snapshot_json);
         let incoming = serde_json::from_str::<DatabaseSnapshot>(new_snapshot_json);
         let (Ok(mut existing), Ok(incoming)) = (existing, incoming) else {
-            return self.augment_snapshot_with_task_capabilities(new_snapshot_json, tasks, manifests);
+            return self.augment_snapshot_with_task_capabilities(
+                new_snapshot_json,
+                tasks,
+                manifests,
+            );
         };
 
         let mut entity_remap = std::collections::HashMap::<u64, u64>::new();
 
         for document in incoming.documents {
-            if !existing.documents.iter().any(|item| item.source_uri == document.source_uri) {
+            if !existing
+                .documents
+                .iter()
+                .any(|item| item.source_uri == document.source_uri)
+            {
                 existing.documents.push(document);
             }
         }
         for entity in incoming.entities {
-            if let Some(found) = existing
-                .entities
-                .iter_mut()
-                .find(|item| {
-                    item.normalized_name == entity.normalized_name
-                        || semantic_entity_match(item, &entity)
-                })
-            {
+            if let Some(found) = existing.entities.iter_mut().find(|item| {
+                item.normalized_name == entity.normalized_name
+                    || semantic_entity_match(item, &entity)
+            }) {
                 entity_remap.insert(entity.id, found.id);
                 found.salience = found.salience.max(entity.salience) + 1;
                 found.mention_count += entity.mention_count;
@@ -384,10 +433,13 @@ impl RagSubsystem {
                     && item.target_entity_id == relationship.target_entity_id
                     && item.relation_type == relationship.relation_type
             }) {
-                existing_relationship.weight =
-                    existing_relationship.weight.max(relationship.weight).saturating_add(1);
-                existing_relationship.confidence =
-                    existing_relationship.confidence.max(relationship.confidence);
+                existing_relationship.weight = existing_relationship
+                    .weight
+                    .max(relationship.weight)
+                    .saturating_add(1);
+                existing_relationship.confidence = existing_relationship
+                    .confidence
+                    .max(relationship.confidence);
                 if existing_relationship.description.len() < relationship.description.len() {
                     existing_relationship.description = relationship.description;
                 }
@@ -396,7 +448,11 @@ impl RagSubsystem {
             }
         }
         for community in incoming.communities {
-            if let Some(found) = existing.communities.iter_mut().find(|item| item.label == community.label) {
+            if let Some(found) = existing
+                .communities
+                .iter_mut()
+                .find(|item| item.label == community.label)
+            {
                 found.rank = found.rank.max(community.rank).saturating_add(2);
                 found.summary = if found.summary.len() >= community.summary.len() {
                     found.summary.clone()
@@ -423,7 +479,13 @@ impl RagSubsystem {
             Ok(snapshot) => snapshot,
             Err(_) => return snapshot_json.to_string(),
         };
-        let mut next_entity_id = snapshot.entities.iter().map(|entity| entity.id).max().unwrap_or(0) + 1;
+        let mut next_entity_id = snapshot
+            .entities
+            .iter()
+            .map(|entity| entity.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
         let mut next_relationship_id = snapshot
             .relationships
             .iter()
@@ -431,12 +493,21 @@ impl RagSubsystem {
             .max()
             .unwrap_or(0)
             + 1;
-        let task_document_id = snapshot.documents.iter().map(|doc| doc.id).max().unwrap_or(0) + 1;
+        let task_document_id = snapshot
+            .documents
+            .iter()
+            .map(|doc| doc.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
 
         snapshot.documents.push(DocumentRecord {
             id: task_document_id,
             title: "task-capability-map".into(),
-            source_uri: format!("spacetimedb://knowledge/task-capability-map/{}", tasks.len()),
+            source_uri: format!(
+                "state_store://knowledge/task-capability-map/{}",
+                tasks.len()
+            ),
             raw_text: summarize_task_capability_map(tasks, &[]),
             status: DocumentStatus::GraphReady,
             created_at_ms: 0,
@@ -456,7 +527,8 @@ impl RagSubsystem {
             );
             for manifest in manifests {
                 if task.role == "Execution"
-                    || task.objective
+                    || task
+                        .objective
                         .to_ascii_lowercase()
                         .contains(&manifest.capability_name.to_ascii_lowercase())
                 {
@@ -495,7 +567,10 @@ impl RagSubsystem {
     }
 }
 
-fn summarize_task_capability_map(tasks: &[SwarmTask], execution_reports: &[ExecutionReport]) -> String {
+fn summarize_task_capability_map(
+    tasks: &[SwarmTask],
+    execution_reports: &[ExecutionReport],
+) -> String {
     let task_summary = tasks
         .iter()
         .map(|task| format!("{} -> {}", task.role, task.objective))
@@ -504,9 +579,10 @@ fn summarize_task_capability_map(tasks: &[SwarmTask], execution_reports: &[Execu
     let execution_summary = execution_reports
         .iter()
         .filter_map(|report| {
-            report.tool_used.as_ref().map(|tool| {
-                format!("{} used {}", report.task.role, tool)
-            })
+            report
+                .tool_used
+                .as_ref()
+                .map(|tool| format!("{} used {}", report.task.role, tool))
         })
         .collect::<Vec<_>>()
         .join("; ");
@@ -528,7 +604,9 @@ fn semantic_entity_match(left: &EntityRecord, right: &EntityRecord) -> bool {
         .filter(|part| !part.is_empty())
         .collect::<std::collections::BTreeSet<_>>();
     let overlap = left_terms.intersection(&right_terms).count();
-    overlap >= 2 || left.normalized_name.contains(&right.normalized_name) || right.normalized_name.contains(&left.normalized_name)
+    overlap >= 2
+        || left.normalized_name.contains(&right.normalized_name)
+        || right.normalized_name.contains(&left.normalized_name)
 }
 
 fn incoming_is_newer(incoming_document_id: u64, existing_document_id: u64) -> bool {
@@ -544,7 +622,10 @@ fn upsert_entity(
     description: String,
 ) -> u64 {
     let normalized_name = normalize_key(&canonical_name);
-    if let Some(existing) = entities.iter_mut().find(|entity| entity.normalized_name == normalized_name) {
+    if let Some(existing) = entities
+        .iter_mut()
+        .find(|entity| entity.normalized_name == normalized_name)
+    {
         existing.salience += 1;
         existing.mention_count += 1;
         existing.weight += 8;
@@ -571,14 +652,17 @@ fn upsert_entity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::AppConfig, tools::{CliOutputMode, ForgedMcpToolManifest}};
+    use crate::{
+        config::AppConfig,
+        tools::{CliOutputMode, ForgedMcpToolManifest},
+    };
 
     #[test]
     fn rag_builds_graph_update_from_swarm_outputs() {
         let rag = RagSubsystem::from_config(&AppConfig::default().rag);
         let update = rag.build_knowledge_update(
             "session-1",
-            "Build SpacetimeDB-native GraphRAG memory",
+            "Build StateStore-native GraphRAG memory",
             "CEO wants a swarm plan with execution and validation",
             &[SwarmTask {
                 task_id: "knowledge-graph-build".into(),
@@ -595,7 +679,7 @@ mod tests {
                     objective: "Run MCP tools".into(),
                     depends_on: Vec::new(),
                 },
-                output: "SpacetimeDB stores schedule events and knowledge snapshots.".into(),
+                output: "StateStore stores schedule events and knowledge snapshots.".into(),
                 tool_used: Some("mcp::local-mcp::invoke".into()),
                 mcp_server: Some("local-mcp".into()),
                 invocation_payload: Some("{\"server\":\"local-mcp\"}".into()),
@@ -679,10 +763,12 @@ mod tests {
         let signals = rag.graph_routing_signals(&augmented);
 
         assert!(signals.forged_capability_count >= 1);
-        assert!(signals
-            .capability_surfaces
-            .iter()
-            .any(|name| name.contains("mcp::local-mcp::diagram-export")));
+        assert!(
+            signals
+                .capability_surfaces
+                .iter()
+                .any(|name| name.contains("mcp::local-mcp::diagram-export"))
+        );
         assert!(signals.prefers_mcp_execution);
     }
 
@@ -763,7 +849,7 @@ mod tests {
                     objective: "Persist graph memory".into(),
                     depends_on: Vec::new(),
                 },
-                output: "SpacetimeDB stores graph memory and execution traces.".into(),
+                output: "StateStore stores graph memory and execution traces.".into(),
                 tool_used: Some("mcp::local-mcp::invoke".into()),
                 mcp_server: Some("local-mcp".into()),
                 invocation_payload: Some("{}".into()),
@@ -791,3 +877,4 @@ mod tests {
         assert!(merged.contains("relationships"));
     }
 }
+

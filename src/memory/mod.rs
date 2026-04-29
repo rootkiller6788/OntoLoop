@@ -1,12 +1,16 @@
-pub mod learning;
+﻿pub mod learning;
 mod sidecar;
+pub mod supermemory;
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Result, bail};
-use autoloop_spacetimedb_adapter::{
+use autoloop_state_adapter::{
     CausalEdgeRecord, LearningEventKind as StoredLearningEventKind, LearningSessionRecord,
-    ReflexionEpisodeRecord, SkillLibraryRecord, SpacetimeDb, WitnessLogRecord,
+    ReflexionEpisodeRecord, SkillLibraryRecord, StateStore, WitnessLogRecord,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +19,7 @@ use crate::{
     providers::ChatMessage,
 };
 
+use crate::tools::{ForgedMcpToolManifest, ToolRegistry};
 pub use learning::{
     EmbeddingProvider, HashEmbeddingProvider, JointRoutingEvidence, LearningAssetKind,
     LearningDocument, LearningEvent, LearningEventKind, LearningFilter, LearningRepository,
@@ -23,7 +28,6 @@ pub use learning::{
     document_from_skill, document_from_witness,
 };
 use sidecar::{SidecarMemoryIndex, SidecarQuery};
-use crate::tools::{ForgedMcpToolManifest, ToolRegistry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryTarget {
@@ -135,6 +139,29 @@ pub struct EvidencePack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningSignal {
+    pub signal_id: String,
+    pub session_id: String,
+    pub trace_id: String,
+    pub source: String,
+    pub evidence_ref: String,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LearningSignalRejectRecord {
+    pub reject_id: String,
+    pub session_id: String,
+    pub trace_id: String,
+    pub source: String,
+    pub target: String,
+    pub reason: String,
+    pub evidence_ref: Option<String>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningGateVerdict {
     pub approved: bool,
     pub reason: String,
@@ -178,6 +205,7 @@ pub struct MemorySubsystem {
     targets: Vec<MemoryTarget>,
     sidecar: Option<Arc<SidecarMemoryIndex>>,
     default_top_k: usize,
+    supermemory: supermemory::SupermemoryKernel,
 }
 
 impl MemorySubsystem {
@@ -204,6 +232,7 @@ impl MemorySubsystem {
             targets,
             sidecar,
             default_top_k: learning.top_k.max(1),
+            supermemory: supermemory::SupermemoryKernel::default(),
         }
     }
 
@@ -218,11 +247,71 @@ impl MemorySubsystem {
         &self.targets
     }
 
+    pub fn supermemory_kernel(&self) -> &supermemory::SupermemoryKernel {
+        &self.supermemory
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_supermemory_pipeline(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        tenant_id: &str,
+        source: &str,
+        content: &str,
+        metadata: BTreeMap<String, String>,
+        document_date: Option<String>,
+        event_date: Option<String>,
+        query: &str,
+    ) -> Result<supermemory::ContextAssembly> {
+        self.supermemory
+            .run_pipeline(
+                db,
+                session_id,
+                tenant_id,
+                source,
+                content,
+                metadata,
+                document_date,
+                event_date,
+                query,
+                self.default_top_k.max(1),
+            )
+            .await
+    }
+
+    pub async fn run_supermemory_queue_worker_once(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        query: &str,
+    ) -> Result<Option<supermemory::ContextAssembly>> {
+        self.supermemory
+            .run_queue_worker_once(db, session_id, query, self.default_top_k.max(1))
+            .await
+    }
+
+    pub async fn retrieve_supermemory_hybrid_hits(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<supermemory::HybridSearchHit>> {
+        self.supermemory
+            .hybrid_search(db, session_id, query, top_k.max(1))
+            .await
+    }
+
     pub fn build_memory_context(&self) -> String {
         self.build_memory_context_for("", &[])
     }
 
-    pub fn build_memory_context_for(&self, user_input: &str, session_history: &[ChatMessage]) -> String {
+    pub fn build_memory_context_for(
+        &self,
+        user_input: &str,
+        session_history: &[ChatMessage],
+    ) -> String {
         let request = MemoryContextRequest {
             user_input,
             session_history,
@@ -234,7 +323,12 @@ impl MemorySubsystem {
             return "- No memory signals selected.".into();
         }
 
-        selected.sort_by(|left, right| right.priority.cmp(&left.priority).then_with(|| left.label.cmp(&right.label)));
+        selected.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| left.label.cmp(&right.label))
+        });
 
         selected
             .into_iter()
@@ -245,7 +339,7 @@ impl MemorySubsystem {
 
     pub async fn build_memory_context_with_learning(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         user_input: &str,
         session_history: &[ChatMessage],
@@ -272,7 +366,10 @@ impl MemorySubsystem {
         Ok(format!("{base}\n{learning_lines}"))
     }
 
-    pub fn select_relevant_memories(&self, request: &MemoryContextRequest<'_>) -> Vec<MemorySnippet> {
+    pub fn select_relevant_memories(
+        &self,
+        request: &MemoryContextRequest<'_>,
+    ) -> Vec<MemorySnippet> {
         let query_terms = tokenize(request.user_input);
         let mut snippets = self.memory_candidates(request.session_history);
         let mut dedup = HashSet::new();
@@ -307,8 +404,8 @@ impl MemorySubsystem {
                     MemorySnippet {
                         source: MemoryTarget::LongTerm,
                         label: "MEMORY".into(),
-                        content: "AutoLoop uses Rust-first runtime boundaries, SpacetimeDB state, and MCP-compatible provider/tool adapters.".into(),
-                        tags: vec!["autoloop".into(), "rust".into(), "spacetimedb".into(), "mcp".into()],
+                        content: "AutoLoop uses Rust-first runtime boundaries, StateStore state, and MCP-compatible provider/tool adapters.".into(),
+                        tags: vec!["autoloop".into(), "rust".into(), "state_store".into(), "mcp".into()],
                         priority: 9,
                     },
                     MemorySnippet {
@@ -339,11 +436,7 @@ impl MemorySubsystem {
         snippets
     }
 
-    pub async fn refresh_learning_sidecar(
-        &self,
-        db: &SpacetimeDb,
-        session_id: &str,
-    ) -> Result<()> {
+    pub async fn refresh_learning_sidecar(&self, db: &StateStore, session_id: &str) -> Result<()> {
         let Some(sidecar) = &self.sidecar else {
             return Ok(());
         };
@@ -365,7 +458,10 @@ impl MemorySubsystem {
         for witness in db.list_witness_log_records(session_id).await? {
             sidecar.upsert(document_from_witness(&witness)).await?;
         }
-        for record in db.list_knowledge_by_prefix(ToolRegistry::FORGED_TOOL_PREFIX).await? {
+        for record in db
+            .list_knowledge_by_prefix(ToolRegistry::FORGED_TOOL_PREFIX)
+            .await?
+        {
             if let Ok(manifest) = serde_json::from_str::<ForgedMcpToolManifest>(&record.value) {
                 sidecar
                     .upsert(document_from_forged_tool_manifest(&record, &manifest))
@@ -379,7 +475,7 @@ impl MemorySubsystem {
 
     pub async fn retrieve_learning_evidence(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         query: &str,
         top_k: usize,
@@ -403,7 +499,7 @@ impl MemorySubsystem {
 
     pub async fn persist_learning_event(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         event: &LearningEvent,
     ) -> Result<WitnessLogRecord> {
         let record = WitnessLogRecord {
@@ -426,7 +522,7 @@ impl MemorySubsystem {
 
     pub async fn persist_reflexion_episode(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         episode: &ReflexionEpisode,
     ) -> Result<()> {
@@ -455,10 +551,14 @@ impl MemorySubsystem {
 
     pub async fn persist_skill(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         skill: &SkillRecord,
+        signal: &LearningSignal,
     ) -> Result<()> {
+        self
+            .validate_learning_signal(db, signal, session_id, "skill_registry.persist_skill")
+            .await?;
         let record = SkillLibraryRecord {
             id: format!("{session_id}:{}", normalize(&skill.name)),
             session_id: session_id.to_string(),
@@ -477,7 +577,7 @@ impl MemorySubsystem {
 
     pub async fn persist_causal_edge(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         edge: &CausalEdge,
     ) -> Result<()> {
@@ -501,7 +601,7 @@ impl MemorySubsystem {
 
     pub async fn persist_witness_log(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         witness: &WitnessLog,
     ) -> Result<()> {
@@ -526,7 +626,7 @@ impl MemorySubsystem {
 
     pub async fn persist_learning_session(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session: LearningSessionRecord,
     ) -> Result<()> {
         db.upsert_learning_session_record(session).await?;
@@ -535,7 +635,7 @@ impl MemorySubsystem {
 
     pub async fn consolidate_learning(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
     ) -> Result<LearningConsolidation> {
         let episodes = db.list_reflexion_episodes(session_id).await?;
@@ -588,7 +688,7 @@ impl MemorySubsystem {
 
     pub async fn collect_evidence_pack(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         proposal: &LearningProposal,
     ) -> Result<EvidencePack> {
@@ -676,11 +776,20 @@ impl MemorySubsystem {
 
     pub async fn persist_learning_proposal(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         proposal: &LearningProposal,
         evidence: &EvidencePack,
         verdict: &LearningGateVerdict,
+        signal: &LearningSignal,
     ) -> Result<()> {
+        self
+            .validate_learning_signal(
+                db,
+                signal,
+                &proposal.session_id,
+                "mutable_memory_ledger.persist_learning_proposal",
+            )
+            .await?;
         db.upsert_json_knowledge(
             format!(
                 "memory:{}:learning-proposal:{}",
@@ -690,6 +799,7 @@ impl MemorySubsystem {
                 "proposal": proposal,
                 "evidence": evidence,
                 "verdict": verdict,
+                "learning_signal": signal,
             }),
             "learning-gate",
         )
@@ -708,8 +818,10 @@ impl MemorySubsystem {
                 "anchor": proposal.anchor,
                 "reason": proposal.reason,
                 "verdict": verdict.reason,
-                "quality_score": evidence.quality_score
+                "quality_score": evidence.quality_score,
+                "learning_signal": signal,
             }),
+            signal,
         )
         .await?;
         Ok(())
@@ -717,11 +829,20 @@ impl MemorySubsystem {
 
     pub async fn promote_skill_with_verdict(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         proposal: &LearningProposal,
         verdict: &LearningGateVerdict,
         candidate: &SkillRecord,
+        signal: &LearningSignal,
     ) -> Result<SkillPromotionRecord> {
+        self
+            .validate_learning_signal(
+                db,
+                signal,
+                &proposal.session_id,
+                "skill_registry.promote_skill_with_verdict",
+            )
+            .await?;
         let now = current_time_ms();
         let stage = if verdict.approved {
             SkillPromotionStage::Canary
@@ -741,11 +862,17 @@ impl MemorySubsystem {
                     confidence,
                     ..candidate.clone()
                 },
+                signal,
             )
             .await?;
         }
         let record = SkillPromotionRecord {
-            promotion_id: format!("promotion:{}:{}:{}", proposal.session_id, normalize(&candidate.name), now),
+            promotion_id: format!(
+                "promotion:{}:{}:{}",
+                proposal.session_id,
+                normalize(&candidate.name),
+                now
+            ),
             proposal_id: proposal.proposal_id.clone(),
             session_id: proposal.session_id.clone(),
             skill_name: candidate.name.clone(),
@@ -755,7 +882,10 @@ impl MemorySubsystem {
             created_at_ms: now,
         };
         db.upsert_json_knowledge(
-            format!("memory:{}:skill-promotion:{}", proposal.session_id, record.promotion_id),
+            format!(
+                "memory:{}:skill-promotion:{}",
+                proposal.session_id, record.promotion_id
+            ),
             &record,
             "learning-promotion",
         )
@@ -770,6 +900,7 @@ impl MemorySubsystem {
             },
             &record.promotion_id,
             &record,
+            signal,
         )
         .await?;
         Ok(record)
@@ -777,18 +908,30 @@ impl MemorySubsystem {
 
     pub async fn rollback_skill_promotion(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         promotion: &SkillPromotionRecord,
         reason: &str,
+        signal: &LearningSignal,
     ) -> Result<SkillPromotionRecord> {
+        self
+            .validate_learning_signal(
+                db,
+                signal,
+                session_id,
+                "skill_registry.rollback_skill_promotion",
+            )
+            .await?;
         let mut rolled = promotion.clone();
         rolled.stage = SkillPromotionStage::RolledBack;
         rolled.reason = reason.to_string();
         rolled.confidence = 0.0;
         rolled.created_at_ms = current_time_ms();
         db.upsert_json_knowledge(
-            format!("memory:{session_id}:skill-promotion:{}", rolled.promotion_id),
+            format!(
+                "memory:{session_id}:skill-promotion:{}",
+                rolled.promotion_id
+            ),
             &rolled,
             "learning-promotion",
         )
@@ -799,6 +942,20 @@ impl MemorySubsystem {
             StrategyMemoryTier::ColdArchive,
             &rolled.promotion_id,
             &rolled,
+            signal,
+        )
+        .await?;
+        // Rollback must not keep a promoted skill as long-term active memory.
+        self.persist_skill(
+            db,
+            session_id,
+            &SkillRecord {
+                name: rolled.skill_name.clone(),
+                trigger: "rolled-back".into(),
+                procedure: format!("rolled_back:{}", reason),
+                confidence: 0.0,
+            },
+            signal,
         )
         .await?;
         Ok(rolled)
@@ -806,12 +963,21 @@ impl MemorySubsystem {
 
     pub async fn persist_strategy_memory_tier<T: Serialize>(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         tier: StrategyMemoryTier,
         key: &str,
         payload: &T,
+        signal: &LearningSignal,
     ) -> Result<()> {
+        self
+            .validate_learning_signal(
+                db,
+                signal,
+                session_id,
+                "mutable_memory_ledger.persist_strategy_memory_tier",
+            )
+            .await?;
         let tier_key = match tier {
             StrategyMemoryTier::HotSession => "hot",
             StrategyMemoryTier::WarmValidated => "warm",
@@ -819,14 +985,96 @@ impl MemorySubsystem {
         };
         db.upsert_json_knowledge(
             format!("memory:strategy:{tier_key}:{session_id}:{}", normalize(key)),
-            payload,
+            &serde_json::json!({
+                "payload": payload,
+                "learning_signal": signal,
+            }),
             "strategy-memory",
         )
         .await?;
         Ok(())
     }
 
-    pub async fn strategy_memory_layers(&self, db: &SpacetimeDb, session_id: &str) -> Result<serde_json::Value> {
+    async fn validate_learning_signal(
+        &self,
+        db: &StateStore,
+        signal: &LearningSignal,
+        expected_session_id: &str,
+        target: &str,
+    ) -> Result<()> {
+        if signal.session_id.trim() != expected_session_id.trim() {
+            self
+                .persist_learning_signal_reject(
+                    db,
+                    expected_session_id,
+                    &signal.trace_id,
+                    &signal.source,
+                    target,
+                    "learning_signal.session_id_mismatch",
+                    Some(signal.evidence_ref.as_str()),
+                )
+                .await?;
+            bail!(
+                "learning signal rejected for `{target}`: session mismatch (expected={}, actual={})",
+                expected_session_id,
+                signal.session_id
+            );
+        }
+        if signal.evidence_ref.trim().is_empty() {
+            self
+                .persist_learning_signal_reject(
+                    db,
+                    expected_session_id,
+                    &signal.trace_id,
+                    &signal.source,
+                    target,
+                    "learning_signal.missing_evidence_ref",
+                    None,
+                )
+                .await?;
+            bail!("learning signal rejected for `{target}`: evidence_ref is required");
+        }
+        Ok(())
+    }
+
+    async fn persist_learning_signal_reject(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        trace_id: &str,
+        source: &str,
+        target: &str,
+        reason: &str,
+        evidence_ref: Option<&str>,
+    ) -> Result<()> {
+        let now = current_time_ms();
+        let record = LearningSignalRejectRecord {
+            reject_id: format!("learning-signal-reject:{session_id}:{now}:{}", normalize(target)),
+            session_id: session_id.to_string(),
+            trace_id: trace_id.to_string(),
+            source: source.to_string(),
+            target: target.to_string(),
+            reason: reason.to_string(),
+            evidence_ref: evidence_ref.map(str::to_string),
+            created_at_ms: now,
+        };
+        db.upsert_json_knowledge(
+            format!(
+                "evidence:memory:{session_id}:learning-signal-reject:{}",
+                record.reject_id
+            ),
+            &record,
+            "learning-signal-guard",
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn strategy_memory_layers(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+    ) -> Result<serde_json::Value> {
         let hot = db
             .list_knowledge_by_prefix(&format!("memory:strategy:hot:{session_id}:"))
             .await?;
@@ -862,7 +1110,11 @@ fn consolidate_skills(
         })
         .collect::<Vec<_>>();
 
-    if let Some(last_failure) = episodes.iter().rev().find(|episode| episode.status != "success") {
+    if let Some(last_failure) = episodes
+        .iter()
+        .rev()
+        .find(|episode| episode.status != "success")
+    {
         consolidated.push(SkillRecord {
             name: "rollback-on-regression".into(),
             trigger: last_failure.objective.clone(),
@@ -883,7 +1135,10 @@ fn cluster_failures(
     session_id: &str,
 ) -> Vec<FailurePatternCluster> {
     let mut cluster_map: std::collections::HashMap<String, Vec<String>> = Default::default();
-    for episode in episodes.iter().filter(|episode| episode.status != "success") {
+    for episode in episodes
+        .iter()
+        .filter(|episode| episode.status != "success")
+    {
         let pattern = if episode.outcome.to_ascii_lowercase().contains("approval") {
             "approval-gated-failure"
         } else if episode.outcome.to_ascii_lowercase().contains("coverage") {
@@ -922,7 +1177,8 @@ fn validate_causal_edges(edges: &[CausalEdgeRecord]) -> CausalValidationSummary 
             summary: "No causal edges to validate yet.".into(),
         };
     }
-    let average_confidence = edges.iter().map(|edge| edge.confidence).sum::<f32>() / edges.len() as f32;
+    let average_confidence =
+        edges.iter().map(|edge| edge.confidence).sum::<f32>() / edges.len() as f32;
     CausalValidationSummary {
         validated_edges: edges.len(),
         average_confidence,
@@ -937,7 +1193,7 @@ fn validate_causal_edges(edges: &[CausalEdgeRecord]) -> CausalValidationSummary 
 async fn derive_capability_improvements(
     clusters: &[FailurePatternCluster],
     witness: &[WitnessLogRecord],
-    db: &SpacetimeDb,
+    db: &StateStore,
 ) -> Result<Vec<CapabilityImprovementProposal>> {
     let manifests = db
         .list_knowledge_by_prefix(ToolRegistry::FORGED_TOOL_PREFIX)
@@ -972,7 +1228,9 @@ async fn derive_capability_improvements(
                     },
                     rationale: related_cluster
                         .map(|cluster| format!("Observed cluster {}", cluster.pattern))
-                        .unwrap_or_else(|| "Negative witness evidence suggests route instability".into()),
+                        .unwrap_or_else(|| {
+                            "Negative witness evidence suggests route instability".into()
+                        }),
                     priority: if manifest.requires_gate() { 0.9 } else { 0.65 },
                 })
             } else {
@@ -1034,38 +1292,61 @@ fn normalize(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::AppConfig, tools::{ForgedMcpToolManifest, ToolRegistry}};
-    use autoloop_spacetimedb_adapter::{SpacetimeBackend, SpacetimeDbConfig};
+    use crate::{
+        config::AppConfig,
+        tools::{ForgedMcpToolManifest, ToolRegistry},
+    };
+    use autoloop_state_adapter::{StateStoreBackend, StateStoreConfig};
+
+    fn sample_signal(session_id: &str) -> LearningSignal {
+        LearningSignal {
+            signal_id: format!("learning-signal:{session_id}:test"),
+            session_id: session_id.to_string(),
+            trace_id: format!("trace:{session_id}:learning:test"),
+            source: "memory.tests".to_string(),
+            evidence_ref: format!("eventlog:{session_id}:learning:test"),
+            metadata: BTreeMap::new(),
+        }
+    }
 
     #[test]
     fn memory_prefers_high_relevance_and_skips_redundancy() {
         let memory = MemorySubsystem {
-            targets: vec![MemoryTarget::Identity, MemoryTarget::LongTerm, MemoryTarget::History],
+            targets: vec![
+                MemoryTarget::Identity,
+                MemoryTarget::LongTerm,
+                MemoryTarget::History,
+            ],
             sidecar: None,
             default_top_k: 4,
+            supermemory: supermemory::SupermemoryKernel::default(),
         };
         let history = vec![
             ChatMessage {
                 role: "user".into(),
-                content: "We store anchors in SpacetimeDB for GraphRAG.".into(),
+                content: "We store anchors in StateStore for GraphRAG.".into(),
             },
             ChatMessage {
                 role: "assistant".into(),
-                content: "We store anchors in SpacetimeDB for GraphRAG.".into(),
+                content: "We store anchors in StateStore for GraphRAG.".into(),
             },
         ];
 
         let selected = memory.select_relevant_memories(&MemoryContextRequest {
-            user_input: "How should anchor memory be stored in SpacetimeDB?",
+            user_input: "How should anchor memory be stored in StateStore?",
             session_history: &history,
             max_items: 4,
         });
 
-        assert!(selected.iter().any(|snippet| snippet.content.contains("SpacetimeDB")));
+        assert!(
+            selected
+                .iter()
+                .any(|snippet| snippet.content.contains("StateStore"))
+        );
         assert_eq!(
             selected
                 .iter()
-                .filter(|snippet| snippet.content == "We store anchors in SpacetimeDB for GraphRAG.")
+                .filter(|snippet| snippet.content == "We store anchors in StateStore for GraphRAG.")
                 .count(),
             1
         );
@@ -1075,10 +1356,10 @@ mod tests {
     async fn memory_retrieves_global_forged_tool_assets() {
         let config = AppConfig::default();
         let memory = MemorySubsystem::from_config(&config.memory, &config.learning);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -1101,7 +1382,11 @@ mod tests {
             ..ForgedMcpToolManifest::default()
         };
         db.upsert_json_knowledge(
-            format!("{}{}", ToolRegistry::FORGED_TOOL_PREFIX, manifest.registered_tool_name),
+            format!(
+                "{}{}",
+                ToolRegistry::FORGED_TOOL_PREFIX,
+                manifest.registered_tool_name
+            ),
             &manifest,
             "cli-forge",
         )
@@ -1113,17 +1398,21 @@ mod tests {
             .await
             .expect("retrieve");
 
-        assert!(results.iter().any(|item| item.document.asset_kind == LearningAssetKind::ForgedToolManifest));
+        assert!(
+            results
+                .iter()
+                .any(|item| item.document.asset_kind == LearningAssetKind::ForgedToolManifest)
+        );
     }
 
     #[tokio::test]
     async fn memory_consolidates_learning_assets_into_improvement_signals() {
         let config = AppConfig::default();
         let memory = MemorySubsystem::from_config(&config.memory, &config.learning);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -1155,7 +1444,11 @@ mod tests {
             .await
             .expect("witness");
         db.upsert_json_knowledge(
-            format!("{}{}", ToolRegistry::FORGED_TOOL_PREFIX, "mcp::local-mcp::deploy"),
+            format!(
+                "{}{}",
+                ToolRegistry::FORGED_TOOL_PREFIX,
+                "mcp::local-mcp::deploy"
+            ),
             &ForgedMcpToolManifest {
                 registered_tool_name: "mcp::local-mcp::deploy".into(),
                 delegate_tool_name: "mcp::local-mcp::invoke".into(),
@@ -1191,10 +1484,10 @@ mod tests {
     async fn p12_promotion_pipeline_supports_canary_and_rollback_with_strategy_tiers() {
         let config = AppConfig::default();
         let memory = MemorySubsystem::from_config(&config.memory, &config.learning);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -1224,6 +1517,7 @@ mod tests {
                     procedure: "use evidence-aware route scoring".into(),
                     confidence: 0.77,
                 },
+                &sample_signal("session-p12-promote"),
             )
             .await
             .expect("promote");
@@ -1235,6 +1529,7 @@ mod tests {
                 "session-p12-promote",
                 &promotion,
                 "regression detected",
+                &sample_signal("session-p12-promote"),
             )
             .await
             .expect("rollback");
@@ -1247,4 +1542,56 @@ mod tests {
         assert!(layers["warm_count"].as_u64().unwrap_or(0) >= 1);
         assert!(layers["cold_count"].as_u64().unwrap_or(0) >= 1);
     }
+
+    #[tokio::test]
+    async fn learning_signal_without_evidence_ref_is_rejected_and_audited() {
+        let config = AppConfig::default();
+        let memory = MemorySubsystem::from_config(&config.memory, &config.learning);
+        let db = StateStore::from_config(&StateStoreConfig {
+            enabled: true,
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
+            module_name: "autoloop_core".into(),
+            namespace: "autoloop".into(),
+            pool_size: 2,
+        });
+
+        let rejected = memory
+            .persist_skill(
+                &db,
+                "session-learning-reject",
+                &SkillRecord {
+                    name: "skill-reject".into(),
+                    trigger: "reject".into(),
+                    procedure: "noop".into(),
+                    confidence: 0.1,
+                },
+                &LearningSignal {
+                    signal_id: "sig:reject".into(),
+                    session_id: "session-learning-reject".into(),
+                    trace_id: "trace:reject".into(),
+                    source: "tests".into(),
+                    evidence_ref: "".into(),
+                    metadata: BTreeMap::new(),
+                },
+            )
+            .await;
+
+        assert!(rejected.is_err(), "missing evidence_ref must be rejected");
+        let reject_records = db
+            .list_knowledge_by_prefix("evidence:memory:session-learning-reject:learning-signal-reject:")
+            .await
+            .expect("list rejects");
+        assert!(
+            !reject_records.is_empty(),
+            "rejection must be persisted for query-plane/audit visibility"
+        );
+        assert!(
+            reject_records
+                .first()
+                .map(|item| item.value.contains("learning_signal.missing_evidence_ref"))
+                .unwrap_or(false)
+        );
+    }
 }
+

@@ -1,0 +1,7 @@
+{
+  "id": "s3-mcp-skill",
+  "version": "v1",
+  "layer": "s3_prompt_mcp",
+  "created_at_ms": 1775806301363,
+  "enabled": true
+}

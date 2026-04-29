@@ -1,0 +1,13 @@
+[package]
+name = "autoloop-postgres-adapter"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "AutoLoop internal adapter layer for PostgreSQL-backed state"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio-postgres = "0.7"

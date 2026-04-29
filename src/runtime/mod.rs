@@ -1,19 +1,42 @@
+﻿pub mod attestation_verifier;
+pub mod decision_propagator;
+pub mod decision_protocol;
+pub mod evidence_ledger;
+pub mod evidence_tagger;
+pub mod execution_fabric;
+pub mod flow_state_engine;
+pub mod hook_runtime;
+pub mod mode_dispatcher;
+pub mod tool_execution_stack;
+pub mod trigger_runtime;
+pub mod trust_bridge;
+pub mod wasm_sandbox_host;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
-use anyhow::{Result, bail};
-use autoloop_spacetimedb_adapter::{
-    BudgetAccount, CostAttribution, PermissionAction, QuotaWindow, ScheduleEvent, SpacetimeDb,
+use self::evidence_tagger::{EvidenceTag, EvidenceTagStage, EvidenceTagger};
+use self::hook_runtime::{HookChannel, HookOutcome, HookRule, HookRuntime};
+use self::tool_execution_stack::{
+    ToolDegradeStrategy, ToolReliabilityPolicy, run_layered_tool_execution,
+};
+use self::wasm_sandbox_host::{WasmSandboxExecutionResult, WasmSandboxHost, WasmSandboxLimits, WasmSandboxPlan};
+use anyhow::{Context, Result, bail};
+use autoloop_state_adapter::{
+    BudgetAccount, CostAttribution, PermissionAction, QuotaWindow, ScheduleEvent, StateStore,
     SpendLedger, SpendLedgerKind,
 };
+use trustkernel::resource::enforce_runtime_island_hardening;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tokio::{process::Command, time::{Duration, timeout}};
+use tokio::{
+    process::Command,
+    time::{Duration, timeout},
+};
 
 use crate::{
-    config::{RuntimeConfig, RuntimeGateMode},
-    contracts::types::TaskEnvelope,
+    config::{AttestationBackend, PolicyMode as RuntimePolicyMode, RuntimeConfig, RuntimeGateMode},
+    contracts::{sandbox::RuntimeClass, signal::SignalContext, types::TaskEnvelope},
     hooks::LearningTask,
     observability::event_stream::{
         ArtifactDigest, DeterminismBoundary, ReplayAnalysisReport, ReplayDeviation, ReplaySnapshot,
@@ -22,8 +45,12 @@ use crate::{
     },
     orchestration::{ExecutionReport, RequirementBrief, RoutingContext},
     providers::{ChatMessage, LlmResponse, ProviderRegistry},
+    security::permission_mode::{PermissionModeDecisionKind, PermissionModeEngine},
     session::signal::WorkflowSignal,
-    tools::{CapabilityRisk, CapabilityStatus, ExecutionStep, ExecutionStepResult, ForgedMcpToolManifest, RenderedCommandSpec, ToolRegistry, TrustStatus, build_command_spec},
+    tools::{
+        CapabilityRisk, CapabilityStatus, ExecutionStep, ExecutionStepResult,
+        ForgedMcpToolManifest, RenderedCommandSpec, ToolRegistry, TrustStatus, build_command_spec,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -53,7 +80,20 @@ pub struct RuntimeKernel {
     pub default_budget_micros: u64,
     pub quota_window_ms: u64,
     pub quota_window_budget_micros: u64,
+    attestation_required: bool,
+    attestation_backend: AttestationBackend,
+    attestation_secret_env: String,
+    attestation_token_env: String,
+    attestation_quote_env: String,
+    attestation_cert_chain_env: String,
+    attestation_cert_subject_allowlist: Vec<String>,
+    attestation_remote_url: Option<String>,
+    attestation_policy: crate::contracts::types::AttestationPolicy,
+    permission_mode_default: String,
+    policy_mode_default: RuntimePolicyMode,
     budget_lock: Arc<Mutex<()>>,
+    hook_runtime: Arc<Mutex<HookRuntime>>,
+    parallel_tool_windows: Arc<StdMutex<HashMap<String, usize>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +128,25 @@ pub struct RuntimeExecuteResult {
     pub guard_report: RuntimeGuardReport,
     pub provider_response: Option<LlmResponse>,
     pub estimated_prompt_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct ClassifiedExecutionOutput {
+    content: String,
+    sandbox_policy: Option<SandboxPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WasmSandboxRequest {
+    module: String,
+    #[serde(default = "default_wasm_entrypoint")]
+    entrypoint: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+fn default_wasm_entrypoint() -> String {
+    "autoloop_run".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -205,6 +264,25 @@ struct BudgetReservation {
     policy_id: String,
     reserved_micros: u64,
     started_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ParallelToolWindowGuard {
+    session_key: String,
+    windows: Arc<StdMutex<HashMap<String, usize>>>,
+}
+
+impl Drop for ParallelToolWindowGuard {
+    fn drop(&mut self) {
+        if let Ok(mut windows) = self.windows.lock() {
+            if let Some(active) = windows.get_mut(&self.session_key) {
+                *active = active.saturating_sub(1);
+                if *active == 0 {
+                    windows.remove(&self.session_key);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,8 +437,201 @@ impl RuntimeKernel {
             default_budget_micros: config.default_budget_micros,
             quota_window_ms: config.quota_window_ms,
             quota_window_budget_micros: config.quota_window_budget_micros,
+            attestation_required: config.attestation_required,
+            attestation_backend: config.attestation_backend.clone(),
+            attestation_secret_env: config.attestation_secret_env.clone(),
+            attestation_token_env: config.attestation_token_env.clone(),
+            attestation_quote_env: config.attestation_quote_env.clone(),
+            attestation_cert_chain_env: config.attestation_cert_chain_env.clone(),
+            attestation_cert_subject_allowlist: config.attestation_cert_subject_allowlist.clone(),
+            attestation_remote_url: config.attestation_remote_url.clone(),
+            attestation_policy: config.attestation_policy.clone(),
+            permission_mode_default: config.permission_mode.clone(),
+            policy_mode_default: config.policy_mode.clone(),
             budget_lock: Arc::new(Mutex::new(())),
+            hook_runtime: Arc::new(Mutex::new(HookRuntime::default())),
+            parallel_tool_windows: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn set_execution_hook_rules(&self, rules: Vec<HookRule>) {
+        self.hook_runtime.lock().await.set_rules(rules);
+    }
+
+    pub async fn execution_hook_rule_count(&self) -> usize {
+        self.hook_runtime.lock().await.rules().len()
+    }
+
+    fn propagation_context(
+        &self,
+        envelope: &TaskEnvelope,
+        capability_id: Option<&str>,
+    ) -> SignalContext {
+        SignalContext {
+            session_id: envelope.session_id.to_string(),
+            trace_id: envelope.trace_id.to_string(),
+            span_id: Some(format!("span:{}:{}", envelope.trace_id, envelope.task_id)),
+            task_id: Some(envelope.task_id.to_string()),
+            capability_id: Some(
+                capability_id
+                    .unwrap_or(envelope.capability_id.as_ref())
+                    .to_string(),
+            ),
+            tenant_id: Some(envelope.identity.tenant_id.clone()),
+            principal_id: Some(envelope.identity.principal_id.clone()),
+        }
+    }
+
+    async fn record_hook_evidence(
+        &self,
+        db: &StateStore,
+        envelope: &TaskEnvelope,
+        stage: &str,
+        outcome: &HookOutcome,
+    ) {
+        let _ = append_event(
+            db,
+            "hook_runtime",
+            envelope.trace_id.to_string(),
+            envelope.session_id.to_string(),
+            Some(envelope.task_id.to_string()),
+            Some(envelope.capability_id.to_string()),
+            self.effective_contract_version(),
+            serde_json::json!({
+                "stage": stage,
+                "channel": format!("{:?}", outcome.channel).to_ascii_lowercase(),
+                "allowed": outcome.allowed,
+                "tool_name": outcome.tool_name,
+                "arguments_digest": digest_text(&outcome.arguments),
+                "output_digest": outcome.output.as_ref().map(|v| digest_text(v)),
+                "error": outcome.error,
+                "traces": outcome.traces,
+                "signal_context": self.propagation_context(envelope, Some(&outcome.tool_name)),
+            }),
+        )
+        .await;
+    }
+
+    async fn apply_stream_hook(
+        &self,
+        db: &StateStore,
+        envelope: &TaskEnvelope,
+        channel: HookChannel,
+        tool_name: &str,
+        arguments: &str,
+        output: &str,
+    ) -> HookOutcome {
+        let outcome = {
+            let hooks = self.hook_runtime.lock().await;
+            hooks.apply_stream_with_channel(channel, tool_name, arguments, output)
+        };
+        self.record_hook_evidence(db, envelope, "stream", &outcome)
+            .await;
+        outcome
+    }
+
+    async fn apply_kill_hook(
+        &self,
+        db: &StateStore,
+        envelope: &TaskEnvelope,
+        channel: HookChannel,
+        tool_name: &str,
+        arguments: &str,
+        detail: &str,
+    ) -> HookOutcome {
+        let outcome = {
+            let hooks = self.hook_runtime.lock().await;
+            hooks.apply_kill_with_channel(channel, tool_name, arguments, detail)
+        };
+        self.record_hook_evidence(db, envelope, "kill", &outcome).await;
+        outcome
+    }
+    pub async fn apply_runtime_mode_hint(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        hint: &str,
+        trace_id: &str,
+    ) -> Result<()> {
+        let _ = append_event(
+            db,
+            "runtime_mode_hint",
+            trace_id.to_string(),
+            session_id.to_string(),
+            None,
+            None,
+            self.effective_contract_version(),
+            serde_json::json!({ "hint": hint }),
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn tag_external_stage(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        trace_id: &str,
+        task_id: Option<&str>,
+        capability_id: Option<&str>,
+        stage: EvidenceTagStage,
+        event_kind: &str,
+        payload: serde_json::Value,
+    ) -> Result<String> {
+        let now = current_time_ms();
+        let tag = EvidenceTag {
+            session_id: session_id.to_string(),
+            trace_id: trace_id.to_string(),
+            task_id: task_id.map(|value| value.to_string()),
+            capability_id: capability_id.map(|value| value.to_string()),
+            stage: stage.clone(),
+            label: event_kind.to_string(),
+            tags: vec![stage.as_str().to_string(), event_kind.to_string()],
+            payload: payload.clone(),
+            created_at_ms: now,
+        };
+        let tag_ref = EvidenceTagger::write(db, &tag, None).await?;
+        let _ = append_event(
+            db,
+            event_kind,
+            trace_id.to_string(),
+            session_id.to_string(),
+            task_id.map(|v| v.to_string()),
+            capability_id.map(|v| v.to_string()),
+            self.effective_contract_version(),
+            serde_json::json!({
+                "stage": stage,
+                "payload": payload,
+                "evidence_tag_ref": tag_ref,
+            }),
+        )
+        .await;
+        Ok(tag_ref)
+    }
+
+    pub fn policy_mode(&self) -> RuntimePolicyMode {
+        self.effective_policy_mode()
+    }
+
+    fn effective_policy_mode(&self) -> RuntimePolicyMode {
+        let raw = std::env::var("AUTOLOOP_POLICY_MODE")
+            .unwrap_or_else(|_| format!("{:?}", self.policy_mode_default).to_ascii_lowercase());
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" => RuntimePolicyMode::Off,
+            "enforced" => RuntimePolicyMode::Enforced,
+            _ => RuntimePolicyMode::Shadow,
+        }
+    }
+    pub fn permission_mode_status(&self) -> serde_json::Value {
+        let configured_default = self.permission_mode_default.clone();
+        let mode = std::env::var("AUTOLOOP_PERMISSION_MODE")
+            .unwrap_or_else(|_| configured_default.clone());
+        serde_json::json!({
+            "mode": mode,
+            "configured_default": configured_default,
+            "high_risk_authorized": mode.eq_ignore_ascii_case("strict"),
+            "source": if std::env::var("AUTOLOOP_PERMISSION_MODE").is_ok() { "env" } else { "config" },
+        })
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -391,9 +662,433 @@ impl RuntimeKernel {
         Ok(())
     }
 
+    fn classify_runtime_class(
+        &self,
+        envelope: &TaskEnvelope,
+        manifest: Option<&ForgedMcpToolManifest>,
+        allow_shell: bool,
+    ) -> RuntimeClass {
+        let capability_id = envelope.capability_id.to_string();
+        if capability_id.starts_with("provider:") {
+            return RuntimeClass::Provider;
+        }
+
+        let trusted_hint = envelope
+            .trust_plan
+            .as_ref()
+            .map(|plan| plan.attestation_required || plan.verify_environment)
+            .unwrap_or(false);
+        let high_risk_hint = manifest
+            .map(|item| item.risk == CapabilityRisk::High)
+            .unwrap_or(false);
+
+        if trusted_hint || high_risk_hint {
+            return RuntimeClass::TrustedHighRisk;
+        }
+
+        if manifest.is_some() && allow_shell {
+            return RuntimeClass::ToolSandboxed;
+        }
+
+        RuntimeClass::ToolNative
+    }
+
+
+    async fn trusted_high_risk_preflight(
+        &self,
+        db: &StateStore,
+        envelope: &TaskEnvelope,
+        preferred_model: Option<&str>,
+    ) -> Result<()> {
+        let policy_mode = self.effective_policy_mode();
+        if matches!(policy_mode, RuntimePolicyMode::Off) {
+            return Ok(());
+        }
+
+        let trusted_ctx = trust_bridge::envelope_to_trusted_request(
+            envelope,
+            preferred_model,
+            self.attestation_required,
+        )?;
+
+        let preflight_result = async {
+            let attestation_required = trusted_ctx.attestation_required || self.attestation_required;
+            trust_bridge::verify_attestation(
+                attestation_required,
+                self.attestation_backend.clone(),
+                &trusted_ctx.attestation_backend_hint,
+                &self.attestation_secret_env,
+                &self.attestation_token_env,
+                &self.attestation_quote_env,
+                &self.attestation_cert_chain_env,
+                &self.attestation_cert_subject_allowlist,
+                self.attestation_remote_url.as_deref(),
+                &self.attestation_policy,
+                &trusted_ctx.request,
+            )
+            .await?;
+
+            if let Some(step) = trusted_ctx.request.plan.steps.first() {
+                enforce_runtime_island_hardening(step, &trusted_ctx.request.constraints)?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        match preflight_result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let reason = error.to_string();
+                if matches!(policy_mode, RuntimePolicyMode::Enforced) {
+                    let _ = append_event(
+                        db,
+                        "policy_reject",
+                        envelope.trace_id.to_string(),
+                        envelope.session_id.to_string(),
+                        Some(envelope.task_id.to_string()),
+                        Some(envelope.capability_id.to_string()),
+                        self.effective_contract_version(),
+                        serde_json::json!({
+                            "reason": reason,
+                            "runtime_class": "trusted_high_risk",
+                            "policy_mode": "enforced",
+                            "tenant_id": &envelope.identity.tenant_id,
+                            "principal_id": &envelope.identity.principal_id,
+                            "policy_id": &envelope.identity.policy_id,
+                        }),
+                    )
+                    .await;
+                    bail!("trusted_high_risk_preflight_failed: {}", reason);
+                }
+
+                let _ = append_event(
+                    db,
+                    "trusted_high_risk_shadow_diff",
+                    envelope.trace_id.to_string(),
+                    envelope.session_id.to_string(),
+                    Some(envelope.task_id.to_string()),
+                    Some(envelope.capability_id.to_string()),
+                    self.effective_contract_version(),
+                    serde_json::json!({
+                        "reason": reason,
+                        "runtime_class": "trusted_high_risk",
+                        "policy_mode": "shadow",
+                        "old_decision": "allow",
+                        "new_decision": "blocked",
+                        "tenant_id": &envelope.identity.tenant_id,
+                        "principal_id": &envelope.identity.principal_id,
+                        "policy_id": &envelope.identity.policy_id,
+                    }),
+                )
+                .await;
+                Ok(())
+            }
+        }
+    }
+
+    async fn execute_classified_tool_path(
+        &self,
+        runtime_class: RuntimeClass,
+        db: &StateStore,
+        tools: &ToolRegistry,
+        envelope: &TaskEnvelope,
+        capability_id: &str,
+        tool_name: &str,
+        manifest: Option<&ForgedMcpToolManifest>,
+        arguments: &str,
+        guard: &mut RuntimeGuardReport,
+    ) -> Result<ClassifiedExecutionOutput> {
+        let signal_context = self.propagation_context(envelope, Some(tool_name));
+        let resolved_sandbox_policy = if matches!(runtime_class, RuntimeClass::ToolSandboxed) {
+            if let Some(manifest) = manifest {
+                let mut policy = self.sandbox_policy_for(tool_name, manifest);
+                policy.cpu_budget_ms = envelope.constraints.timeout_ms;
+                policy.memory_budget_mb = envelope.constraints.max_memory_mb;
+                if !envelope.constraints.io_allow_paths.is_empty() {
+                    policy.filesystem_allow = envelope.constraints.io_allow_paths.clone();
+                }
+                if !envelope.constraints.io_deny_paths.is_empty() {
+                    policy.filesystem_deny = envelope.constraints.io_deny_paths.clone();
+                }
+                Some(policy)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let reliability_policy =
+            self.tool_reliability_policy_for(runtime_class.clone(), capability_id, guard, manifest);
+        let layered = run_layered_tool_execution(
+            db,
+            &signal_context,
+            tool_name,
+            reliability_policy,
+            || async {
+                match runtime_class {
+                    RuntimeClass::Provider => bail!("provider runtime class must not use tool execution path"),
+                    RuntimeClass::ToolNative => tools
+                        .execute_with_context(tool_name, arguments, Some(&signal_context))
+                        .await
+                        .map(|result| result.content),
+                    RuntimeClass::TrustedHighRisk => {
+                        if let Some(plan) =
+                            self.resolve_wasm_sandbox_plan(arguments, envelope, tool_name)?
+                        {
+                            let executed = self.execute_wasm_sandbox(&plan)?;
+                            serde_json::to_string(&executed).map_err(anyhow::Error::from)
+                        } else {
+                            tools
+                                .execute_with_context(tool_name, arguments, Some(&signal_context))
+                                .await
+                                .map(|result| result.content)
+                        }
+                    }
+                    RuntimeClass::ToolSandboxed => {
+                        if let Some(plan) =
+                            self.resolve_wasm_sandbox_plan(arguments, envelope, tool_name)?
+                        {
+                            let mut policy = resolved_sandbox_policy
+                                .clone()
+                                .unwrap_or_else(|| SandboxPolicy {
+                                    filesystem_allow: envelope.constraints.io_allow_paths.clone(),
+                                    filesystem_deny: envelope.constraints.io_deny_paths.clone(),
+                                    cpu_budget_ms: envelope.constraints.timeout_ms,
+                                    memory_budget_mb: envelope.constraints.max_memory_mb,
+                                });
+                            policy.cpu_budget_ms = envelope.constraints.timeout_ms;
+                            policy.memory_budget_mb = envelope.constraints.max_memory_mb;
+                            let executed = self.execute_wasm_sandbox(&plan)?;
+                            return serde_json::to_string(&executed).map_err(anyhow::Error::from);
+                        }
+
+                        let Some(manifest) = manifest else {
+                            return tools
+                                .execute_with_context(tool_name, arguments, Some(&signal_context))
+                                .await
+                                .map(|result| result.content);
+                        };
+
+                        let policy = resolved_sandbox_policy
+                            .clone()
+                            .unwrap_or_else(|| self.sandbox_policy_for(tool_name, manifest));
+                        let executed = self
+                            .execute_sandboxed_manifest(manifest, arguments, &policy)
+                            .await?;
+                        serde_json::to_string(&executed).map_err(anyhow::Error::from)
+                    }
+                }
+            },
+        )
+        .await?;
+
+        let _ = append_event(
+            db,
+            "tool_execution_stack",
+            envelope.trace_id.to_string(),
+            envelope.session_id.to_string(),
+            Some(envelope.task_id.to_string()),
+            Some(envelope.capability_id.to_string()),
+            self.effective_contract_version(),
+            serde_json::json!({
+                "tool_name": tool_name,
+                "runtime_class": format!("{:?}", runtime_class).to_ascii_lowercase(),
+                "persisted_ref": layered.persisted_ref,
+                "observations": layered.observations,
+                "reliability": layered.reliability,
+                "signal_context": signal_context,
+            }),
+        )
+        .await;
+
+        Ok(ClassifiedExecutionOutput {
+            content: layered.content,
+            sandbox_policy: guard
+                .sandbox_policy
+                .clone()
+                .or_else(|| resolved_sandbox_policy.clone()),
+        })
+    }
+
+    fn tool_reliability_policy_for(
+        &self,
+        runtime_class: RuntimeClass,
+        capability_id: &str,
+        guard: &RuntimeGuardReport,
+        manifest: Option<&ForgedMcpToolManifest>,
+    ) -> ToolReliabilityPolicy {
+        let timeout_ms = guard.timeout_secs.saturating_mul(1000).max(1000);
+        let max_retries = guard.attempts_allowed.saturating_sub(1);
+        let retry_backoff_ms = if max_retries == 0 { 0 } else { 120 };
+        let is_mcp = capability_id.starts_with("mcp::")
+            || manifest
+                .and_then(|current| {
+                    let server = current.server.trim();
+                    if server.is_empty() {
+                        None
+                    } else {
+                        Some(server)
+                    }
+                })
+                .is_some();
+        let circuit_failure_threshold = if is_mcp {
+            self.mcp.mcp_breaker_failure_threshold.max(1) as u8
+        } else {
+            self.mcp.tool_breaker_failure_threshold.max(1) as u8
+        };
+        let degrade_strategy = if matches!(runtime_class, RuntimeClass::ToolNative)
+            && !matches!(self.effective_policy_mode(), RuntimePolicyMode::Enforced)
+            && !is_mcp
+        {
+            ToolDegradeStrategy::BestEffortFallback
+        } else {
+            ToolDegradeStrategy::Off
+        };
+
+        ToolReliabilityPolicy {
+            timeout_ms,
+            max_retries,
+            retry_backoff_ms,
+            circuit_failure_threshold,
+            degrade_strategy,
+        }
+    }
+
+    fn resolve_wasm_sandbox_plan(
+        &self,
+        arguments: &str,
+        envelope: &TaskEnvelope,
+        tool_name: &str,
+    ) -> Result<Option<WasmSandboxPlan>> {
+        let parsed = match serde_json::from_str::<serde_json::Value>(arguments) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        let Some(object) = parsed.as_object() else {
+            return Ok(None);
+        };
+
+        let request = if let Some(request_value) = object.get("__wasm_sandbox") {
+            serde_json::from_value::<WasmSandboxRequest>(request_value.clone())
+                .context("invalid __wasm_sandbox request payload")?
+        } else if object.contains_key("wasm_module") {
+            WasmSandboxRequest {
+                module: object
+                    .get("wasm_module")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                entrypoint: object
+                    .get("wasm_entrypoint")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(default_wasm_entrypoint),
+                payload: object
+                    .get("wasm_payload")
+                    .cloned()
+                    .unwrap_or_else(|| parsed.clone()),
+            }
+        } else {
+            return Ok(None);
+        };
+
+        if request.module.trim().is_empty() {
+            bail!("wasm sandbox request must include module path");
+        }
+
+        let module_path =
+            self.resolve_wasm_module_path(&request.module, envelope.identity.tenant_id.as_str())?;
+        Ok(Some(WasmSandboxPlan {
+            module_path: module_path.to_string_lossy().to_string(),
+            entrypoint: request.entrypoint,
+            payload: serde_json::json!({
+                "tenant_id": envelope.identity.tenant_id,
+                "principal_id": envelope.identity.principal_id,
+                "session_id": envelope.session_id,
+                "trace_id": envelope.trace_id,
+                "task_id": envelope.task_id,
+                "capability_id": envelope.capability_id,
+                "tool_name": tool_name,
+                "input": request.payload,
+            }),
+        }))
+    }
+
+    fn resolve_wasm_module_path(&self, module: &str, tenant_id: &str) -> Result<PathBuf> {
+        let provided = PathBuf::from(module);
+        if provided.is_absolute() {
+            return Ok(provided);
+        }
+
+        let from_rule = PathBuf::from("D:\\AutoLoop\\autoloop-app\\rule\\wasmtime-main").join(module);
+        if from_rule.exists() {
+            return Ok(from_rule);
+        }
+
+        let tenant_scoped = PathBuf::from("D:\\AutoLoop\\autoloop-app\\rule\\wasmtime-main")
+            .join("tenants")
+            .join(tenant_id)
+            .join(module);
+        if tenant_scoped.exists() {
+            return Ok(tenant_scoped);
+        }
+
+        Ok(provided)
+    }
+
+    fn execute_wasm_sandbox(&self, plan: &WasmSandboxPlan) -> Result<WasmSandboxExecutionResult> {
+        let host = WasmSandboxHost::new(WasmSandboxLimits::default())?;
+        host.execute_plan(plan)
+    }
+
+    fn max_parallel_tool_window(&self) -> usize {
+        let parallel_limit = self.limits.max_parallel_agents.max(1);
+        if !self.budget_enforced {
+            return parallel_limit;
+        }
+        let budget_limit = (self.quota_window_budget_micros / 500).max(1) as usize;
+        parallel_limit.min(budget_limit).max(1)
+    }
+
+    fn try_enter_parallel_tool_window(
+        &self,
+        session_id: &str,
+    ) -> Result<(ParallelToolWindowGuard, usize, usize)> {
+        let limit = self.max_parallel_tool_window();
+        let mut windows = self
+            .parallel_tool_windows
+            .lock()
+            .map_err(|_| anyhow::anyhow!("parallel tool window lock poisoned"))?;
+        let entry = windows.entry(session_id.to_string()).or_insert(0usize);
+        *entry = entry.saturating_add(1);
+        let active = *entry;
+        if active > limit {
+            let previous_active = active;
+            *entry = entry.saturating_sub(1);
+            if *entry == 0 {
+                windows.remove(session_id);
+            }
+            bail!(
+                "parallel tool-call budget guard exceeded: active={} limit={} session={}",
+                previous_active,
+                limit,
+                session_id
+            );
+        }
+
+        Ok((
+            ParallelToolWindowGuard {
+                session_key: session_id.to_string(),
+                windows: Arc::clone(&self.parallel_tool_windows),
+            },
+            active,
+            limit,
+        ))
+    }
+
     pub async fn dispatch_mcp_event(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         request: McpDispatchRequest,
     ) -> Result<ScheduleEvent> {
         db.enforce_permission(&request.actor_id, PermissionAction::Dispatch)
@@ -411,7 +1106,7 @@ impl RuntimeKernel {
 
     pub async fn guard_tool_execution_with_state(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         actor_id: &str,
         tool_name: &str,
         manifest: Option<&ForgedMcpToolManifest>,
@@ -419,6 +1114,43 @@ impl RuntimeKernel {
         let mut report = self.guard_tool_execution(actor_id, tool_name, manifest);
         if report.decision != GuardDecision::Allow {
             return Ok(report);
+        }
+
+        if let Some(manifest) = manifest {
+            let policy_mode = self.effective_policy_mode();
+            let pdp_allowed = self
+                .runtime_pdp_strategy_allow(db, actor_id, tool_name, manifest)
+                .await?;
+            let old_allowed = report.decision == GuardDecision::Allow;
+            if matches!(policy_mode, RuntimePolicyMode::Enforced)
+                && manifest.risk == CapabilityRisk::High
+                && !pdp_allowed
+            {
+                report.decision = GuardDecision::Blocked;
+                report.attempts_allowed = 0;
+                report.reason = "policy_pdp enforced deny for high-risk capability".into();
+                report.breaker_key = format!("pdp:{actor_id}:{tool_name}");
+                return Ok(report);
+            }
+            if matches!(policy_mode, RuntimePolicyMode::Shadow) && old_allowed != pdp_allowed {
+                let _ = db
+                    .upsert_json_knowledge(
+                        format!(
+                            "policy-pdp:runtime-shadow-diff:{actor_id}:{tool_name}:{}",
+                            current_time_ms()
+                        ),
+                        &serde_json::json!({
+                            "actor_id": actor_id,
+                            "tool_name": tool_name,
+                            "mode": "shadow",
+                            "old_allowed": old_allowed,
+                            "new_allowed": pdp_allowed,
+                            "risk": format!("{:?}", manifest.risk),
+                        }),
+                        "runtime-policy-pdp",
+                    )
+                    .await;
+            }
         }
 
         let now_ms = current_time_ms();
@@ -459,6 +1191,29 @@ impl RuntimeKernel {
         Ok(report)
     }
 
+    async fn runtime_pdp_strategy_allow(
+        &self,
+        db: &StateStore,
+        actor_id: &str,
+        tool_name: &str,
+        manifest: &ForgedMcpToolManifest,
+    ) -> Result<bool> {
+        if manifest.risk != CapabilityRisk::High {
+            return Ok(true);
+        }
+
+        let session_scoped = format!("policy-pdp:runtime-strategy-allow:{actor_id}:{tool_name}");
+        if json_allow_from_knowledge(db, &session_scoped).await? {
+            return Ok(true);
+        }
+
+        let global_scoped = format!("policy-pdp:runtime-strategy-allow:global:{tool_name}");
+        if json_allow_from_knowledge(db, &global_scoped).await? {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
     pub fn guard_tool_execution(
         &self,
         actor_id: &str,
@@ -510,12 +1265,52 @@ impl RuntimeKernel {
                     decision: GuardDecision::Blocked,
                     attempts_allowed: 0,
                     timeout_secs,
-                    reason: format!("capability health {:.2} is below runtime minimum", manifest.health_score),
+                    reason: format!(
+                        "capability health {:.2} is below runtime minimum",
+                        manifest.health_score
+                    ),
                     breaker_key,
                     sandbox_policy: Some(self.sandbox_policy_for(tool_name, manifest)),
                 };
             }
-            if manifest.requires_gate() || (self.mcp.allow_network_tools && manifest.risk == CapabilityRisk::High) {
+
+            let permission_mode = PermissionModeEngine::from_sources(&self.permission_mode_default);
+            let permission_decision = permission_mode.evaluate_capability(Some(manifest));
+            match permission_decision.kind {
+                PermissionModeDecisionKind::Blocked => {
+                    return RuntimeGuardReport {
+                        decision: GuardDecision::Blocked,
+                        attempts_allowed: 0,
+                        timeout_secs,
+                        reason: format!(
+                            "permission mode blocked ({}): {}",
+                            permission_mode.mode().as_str(),
+                            permission_decision.reason
+                        ),
+                        breaker_key,
+                        sandbox_policy: Some(self.sandbox_policy_for(tool_name, manifest)),
+                    };
+                }
+                PermissionModeDecisionKind::RequiresApproval => {
+                    return RuntimeGuardReport {
+                        decision: GuardDecision::RequiresApproval,
+                        attempts_allowed: 1,
+                        timeout_secs,
+                        reason: format!(
+                            "permission mode requires approval ({}): {}",
+                            permission_mode.mode().as_str(),
+                            permission_decision.reason
+                        ),
+                        breaker_key,
+                        sandbox_policy: Some(self.sandbox_policy_for(tool_name, manifest)),
+                    };
+                }
+                PermissionModeDecisionKind::Allow => {}
+            }
+
+            if manifest.requires_gate()
+                || (self.mcp.allow_network_tools && manifest.risk == CapabilityRisk::High)
+            {
                 return RuntimeGuardReport {
                     decision: GuardDecision::RequiresApproval,
                     attempts_allowed: 1,
@@ -536,10 +1331,9 @@ impl RuntimeKernel {
             sandbox_policy: manifest.map(|manifest| self.sandbox_policy_for(tool_name, manifest)),
         }
     }
-
     pub async fn record_execution_outcome(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         report: &ExecutionReport,
     ) -> Result<Vec<CircuitState>> {
         let Some(tool_name) = report.tool_used.as_deref() else {
@@ -582,7 +1376,8 @@ impl RuntimeKernel {
                 now_ms,
                 report.output.clone(),
             );
-            self.persist_circuit_state(db, &updated_server_state).await?;
+            self.persist_circuit_state(db, &updated_server_state)
+                .await?;
             updates.push(updated_server_state);
         }
 
@@ -639,7 +1434,7 @@ impl RuntimeKernel {
 
     pub async fn circuit_snapshot(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
     ) -> Result<HashMap<String, CircuitState>> {
         let mut snapshot = HashMap::new();
         for record in db.list_knowledge_by_prefix("metrics:circuit:").await? {
@@ -652,7 +1447,7 @@ impl RuntimeKernel {
 
     pub async fn reconcile_budget_account(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         tenant_id: &str,
         account_id: &str,
     ) -> Result<BudgetReconciliationReport> {
@@ -703,7 +1498,7 @@ impl RuntimeKernel {
 
     pub async fn execute(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         tools: &ToolRegistry,
         providers: &ProviderRegistry,
         actor_id: &str,
@@ -714,6 +1509,38 @@ impl RuntimeKernel {
         self.validate_execution_identity(db, envelope).await?;
         let started_at_ms = current_time_ms();
         let capability_id = envelope.capability_id.as_ref();
+        let runtime_class = self.classify_runtime_class(envelope, manifest, tools.allow_shell);
+        if let Some(reason) = validate_hardgate_requirement(&envelope.payload) {
+            let _ = append_event(
+                db,
+                "policy_reject",
+                envelope.trace_id.to_string(),
+                envelope.session_id.to_string(),
+                Some(envelope.task_id.to_string()),
+                Some(envelope.capability_id.to_string()),
+                self.effective_contract_version(),
+                serde_json::json!({
+                    "reason": reason,
+                    "tenant_id": &envelope.identity.tenant_id,
+                    "principal_id": &envelope.identity.principal_id,
+                    "policy_id": &envelope.identity.policy_id,
+                }),
+            )
+            .await;
+            return Ok(RuntimeExecuteResult {
+                content: format!("Execution blocked by hard gate: {reason}"),
+                guard_report: RuntimeGuardReport {
+                    decision: GuardDecision::Blocked,
+                    attempts_allowed: 0,
+                    timeout_secs: envelope.constraints.timeout_ms / 1000,
+                    reason,
+                    breaker_key: format!("hardgate:{}", envelope.capability_id),
+                    sandbox_policy: None,
+                },
+                provider_response: None,
+                estimated_prompt_tokens: None,
+            });
+        }
         let active_degrade = self
             .active_degrade_profile(db, &envelope.session_id.to_string())
             .await?;
@@ -746,7 +1573,10 @@ impl RuntimeKernel {
                         decision: GuardDecision::Blocked,
                         attempts_allowed: 0,
                         timeout_secs: envelope.constraints.timeout_ms / 1000,
-                        reason: format!("degrade profile disabled provider calls: {}", profile.reason),
+                        reason: format!(
+                            "degrade profile disabled provider calls: {}",
+                            profile.reason
+                        ),
                         breaker_key: format!("degrade:{}", profile.profile_id),
                         sandbox_policy: None,
                     },
@@ -773,70 +1603,156 @@ impl RuntimeKernel {
                 });
             }
         }
-        let provider_messages = if capability_id.starts_with("provider:") {
-            Some(
-                if let Ok(messages) = serde_json::from_value::<Vec<ChatMessage>>(envelope.payload.clone()) {
-                    messages
-                } else if let Some(text) = envelope.payload.as_str() {
-                    vec![ChatMessage {
-                        role: "user".into(),
-                        content: text.to_string(),
-                    }]
-                } else {
-                    vec![ChatMessage {
-                        role: "user".into(),
-                        content: serde_json::to_string(&envelope.payload)?,
-                    }]
-                },
-            )
+        let provider_messages = if matches!(runtime_class, RuntimeClass::Provider) {
+            Some(extract_provider_messages(&envelope.payload)?)
         } else {
             None
         };
-        let estimated_tokens_for_precharge = provider_messages
+
+        let estimated_precharge_tokens = provider_messages
             .as_ref()
             .map(|messages| estimate_tokens(messages))
-            .unwrap_or_else(|| {
-                let payload = envelope
-                    .payload
-                    .as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| envelope.payload.to_string());
-                (payload.len() as u32).saturating_div(4).max(1)
-            });
-        let reservation = match self
-            .precharge_budget(db, envelope, estimated_tokens_for_precharge)
-            .await
-        {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                let _ = append_event(
-                    db,
-                    "runtime_blocks",
-                    envelope.trace_id.to_string(),
-                    envelope.session_id.to_string(),
-                    Some(envelope.task_id.to_string()),
-                    Some(envelope.capability_id.to_string()),
-                    self.effective_contract_version(),
-                    serde_json::json!({
-                        "reason": "budget_precharge_exceeded",
-                        "error": error.to_string(),
-                        "tenant_id": &envelope.identity.tenant_id,
-                        "principal_id": &envelope.identity.principal_id,
-                        "policy_id": &envelope.identity.policy_id,
-                    }),
-                )
-                .await;
-                return Err(error);
-            }
-        };
+            .unwrap_or(0);
+        let reservation = self
+            .precharge_budget(db, envelope, estimated_precharge_tokens)
+            .await?;
+
         if capability_id.starts_with("provider:") {
-            let messages = provider_messages.unwrap_or_default();
-            let estimated_prompt_tokens = estimate_tokens(&messages);
+            let hook_target = capability_id;
+            let hook_channel = HookChannel::Prompt;
+            let initial_messages = provider_messages.unwrap_or_default();
+            let pre_hook_input = serde_json::to_string(&initial_messages).unwrap_or_default();
+            let pre_hook_outcome = {
+                let hooks = self.hook_runtime.lock().await;
+                hooks.apply_before_with_channel(
+                    hook_channel.clone(),
+                    hook_target,
+                    &pre_hook_input,
+                )
+            };
+            self.record_hook_evidence(db, envelope, "before", &pre_hook_outcome)
+                .await;
+            if !pre_hook_outcome.allowed {
+                let kill_outcome = self
+                    .apply_kill_hook(
+                        db,
+                        envelope,
+                        hook_channel.clone(),
+                        hook_target,
+                        &pre_hook_outcome.arguments,
+                        pre_hook_outcome.error.as_deref().unwrap_or("hook denied pre_tool_use"),
+                    )
+                    .await;
+                return Ok(RuntimeExecuteResult {
+                    content: format!(
+                        "Execution blocked by PreToolUse hook: {}",
+                        kill_outcome
+                            .error
+                            .clone()
+                            .or_else(|| pre_hook_outcome.error.clone())
+                            .unwrap_or_else(|| "hook denied pre_tool_use".to_string())
+                    ),
+                    guard_report: RuntimeGuardReport {
+                        decision: GuardDecision::Blocked,
+                        attempts_allowed: 0,
+                        timeout_secs: envelope.constraints.timeout_ms / 1000,
+                        reason: "prompt hook blocked execution".into(),
+                        breaker_key: format!("{actor_id}:{capability_id}"),
+                        sandbox_policy: None,
+                    },
+                    provider_response: None,
+                    estimated_prompt_tokens: None,
+                });
+            }
+
+            let post_hook_outcome = {
+                let hooks = self.hook_runtime.lock().await;
+                hooks.apply_step_with_channel(
+                    hook_channel.clone(),
+                    hook_target,
+                    &pre_hook_outcome.arguments,
+                )
+            };
+            self.record_hook_evidence(db, envelope, "step", &post_hook_outcome)
+                .await;
+            if !post_hook_outcome.allowed {
+                let kill_outcome = self
+                    .apply_kill_hook(
+                        db,
+                        envelope,
+                        hook_channel.clone(),
+                        hook_target,
+                        &post_hook_outcome.arguments,
+                        post_hook_outcome
+                            .error
+                            .as_deref()
+                            .unwrap_or("hook denied post_tool_use"),
+                    )
+                    .await;
+                return Ok(RuntimeExecuteResult {
+                    content: format!(
+                        "Execution blocked by PostToolUse hook: {}",
+                        kill_outcome
+                            .error
+                            .clone()
+                            .or_else(|| post_hook_outcome.error.clone())
+                            .unwrap_or_else(|| "hook denied post_tool_use".to_string())
+                    ),
+                    guard_report: RuntimeGuardReport {
+                        decision: GuardDecision::Blocked,
+                        attempts_allowed: 0,
+                        timeout_secs: envelope.constraints.timeout_ms / 1000,
+                        reason: "prompt hook blocked execution".into(),
+                        breaker_key: format!("{actor_id}:{capability_id}"),
+                        sandbox_policy: None,
+                    },
+                    provider_response: None,
+                    estimated_prompt_tokens: None,
+                });
+            }
+
+            let mut messages =
+                parse_hook_prompt_messages(&post_hook_outcome.arguments, initial_messages);
+            let mut estimated_prompt_tokens = estimate_tokens(&messages);
+            let original_estimated_tokens = estimated_prompt_tokens;
+            let mut budget_compaction_applied = false;
+            if estimated_prompt_tokens > envelope.constraints.max_tokens {
+                let compacted = compact_provider_messages_for_budget(
+                    &messages,
+                    envelope.constraints.max_tokens,
+                );
+                let compacted_tokens = estimate_tokens(&compacted);
+                if compacted_tokens < estimated_prompt_tokens {
+                    budget_compaction_applied = true;
+                    messages = compacted;
+                    estimated_prompt_tokens = compacted_tokens;
+                    let _ = append_event(
+                        db,
+                        "runtime_budget.compacted",
+                        envelope.trace_id.to_string(),
+                        envelope.session_id.to_string(),
+                        Some(envelope.task_id.to_string()),
+                        Some(envelope.capability_id.to_string()),
+                        self.effective_contract_version(),
+                        serde_json::json!({
+                            "reason": "provider token budget preflight compacted messages",
+                            "original_estimated_tokens": original_estimated_tokens,
+                            "compacted_estimated_tokens": estimated_prompt_tokens,
+                            "max_tokens": envelope.constraints.max_tokens,
+                        }),
+                    )
+                    .await;
+                }
+            }
             if estimated_prompt_tokens > envelope.constraints.max_tokens {
                 if let Some(reservation) = reservation.as_ref() {
-                    self
-                        .rollback_budget(db, envelope, reservation, "provider_token_budget_exceeded")
-                        .await?;
+                    self.rollback_budget(
+                        db,
+                        envelope,
+                        reservation,
+                        "provider_token_budget_exceeded",
+                    )
+                    .await?;
                 }
                 let _ = append_event(
                     db,
@@ -850,6 +1766,7 @@ impl RuntimeKernel {
                         "reason": "provider token budget exceeded",
                         "estimated_prompt_tokens": estimated_prompt_tokens,
                         "max_tokens": envelope.constraints.max_tokens,
+                        "budget_compaction_applied": budget_compaction_applied,
                         "tenant_id": &envelope.identity.tenant_id,
                         "principal_id": &envelope.identity.principal_id,
                         "policy_id": &envelope.identity.policy_id,
@@ -863,10 +1780,39 @@ impl RuntimeKernel {
                     envelope.constraints.max_tokens
                 );
             }
+
             let traced_response = match providers.chat_with_trace(&messages, preferred_model).await {
                 Ok(response) => response,
                 Err(error) => {
-                    let reason = format!("provider unavailable: {error}");
+                    let on_error_outcome = {
+                        let hooks = self.hook_runtime.lock().await;
+                        hooks.apply_throws_with_channel(
+                            hook_channel.clone(),
+                            hook_target,
+                            &post_hook_outcome.arguments,
+                            &error.to_string(),
+                        )
+                    };
+                    self.record_hook_evidence(db, envelope, "throws", &on_error_outcome)
+                        .await;
+                    let error_text = on_error_outcome
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| error.to_string());
+                    if is_timeout_signal(&error_text) {
+                        let on_timeout_outcome = {
+                            let hooks = self.hook_runtime.lock().await;
+                            hooks.apply_timeout_with_channel(
+                                hook_channel.clone(),
+                                hook_target,
+                                &post_hook_outcome.arguments,
+                                &error_text,
+                            )
+                        };
+                        self.record_hook_evidence(db, envelope, "timeout", &on_timeout_outcome)
+                            .await;
+                    }
+                    let reason = format!("provider unavailable: {error_text}");
                     let _ = self
                         .apply_degrade_profile(
                             db,
@@ -885,15 +1831,25 @@ impl RuntimeKernel {
                         )
                         .await;
                     if let Some(reservation) = reservation.as_ref() {
-                        self
-                            .rollback_budget(db, envelope, reservation, "provider_execution_error")
+                        self.rollback_budget(db, envelope, reservation, "provider_execution_error")
                             .await?;
                     }
-                    let fallback_response = fallback_provider_response(&messages, &error.to_string());
+                    let _ = self
+                        .apply_kill_hook(
+                            db,
+                            envelope,
+                            hook_channel.clone(),
+                            hook_target,
+                            &post_hook_outcome.arguments,
+                            &error_text,
+                        )
+                        .await;
+                    let fallback_response = fallback_provider_response(&messages, &error_text);
                     return Ok(RuntimeExecuteResult {
-                        content: fallback_response.content.clone().unwrap_or_else(|| {
-                            "provider degraded fallback response".to_string()
-                        }),
+                        content: fallback_response
+                            .content
+                            .clone()
+                            .unwrap_or_else(|| "provider degraded fallback response".to_string()),
                         guard_report: RuntimeGuardReport {
                             decision: GuardDecision::Allow,
                             attempts_allowed: 1,
@@ -908,6 +1864,151 @@ impl RuntimeKernel {
                 }
             };
             let response = traced_response.response.clone();
+            let mut content = response.content.clone().unwrap_or_default();
+            let on_stream_outcome = self
+                .apply_stream_hook(
+                    db,
+                    envelope,
+                    HookChannel::Prompt,
+                    hook_target,
+                    &post_hook_outcome.arguments,
+                    &content,
+                )
+                .await;
+            if !on_stream_outcome.allowed {
+                let kill_outcome = self
+                    .apply_kill_hook(
+                        db,
+                        envelope,
+                        HookChannel::Prompt,
+                        hook_target,
+                        &post_hook_outcome.arguments,
+                        on_stream_outcome
+                            .error
+                            .as_deref()
+                            .unwrap_or("hook denied stream"),
+                    )
+                    .await;
+                return Ok(RuntimeExecuteResult {
+                    content: format!(
+                        "Execution blocked by Stream hook: {}",
+                        kill_outcome
+                            .error
+                            .clone()
+                            .or_else(|| on_stream_outcome.error.clone())
+                            .unwrap_or_else(|| "hook denied stream".to_string())
+                    ),
+                    guard_report: RuntimeGuardReport {
+                        decision: GuardDecision::Blocked,
+                        attempts_allowed: 0,
+                        timeout_secs: envelope.constraints.timeout_ms / 1000,
+                        reason: "prompt stream hook blocked execution".into(),
+                        breaker_key: format!("{actor_id}:{capability_id}"),
+                        sandbox_policy: None,
+                    },
+                    provider_response: Some(response.clone()),
+                    estimated_prompt_tokens: Some(estimated_prompt_tokens),
+                });
+            } else if let Some(streamed) = on_stream_outcome.output.clone() {
+                content = streamed;
+            }
+            if is_timeout_signal(&content) {
+                let on_timeout_outcome = {
+                    let hooks = self.hook_runtime.lock().await;
+                    hooks.apply_timeout_with_channel(
+                        HookChannel::Prompt,
+                        hook_target,
+                        &post_hook_outcome.arguments,
+                        &content,
+                    )
+                };
+                self.record_hook_evidence(db, envelope, "timeout", &on_timeout_outcome)
+                    .await;
+                if !on_timeout_outcome.allowed {
+                    let kill_outcome = self
+                        .apply_kill_hook(
+                            db,
+                            envelope,
+                            HookChannel::Prompt,
+                            hook_target,
+                            &post_hook_outcome.arguments,
+                            on_timeout_outcome
+                                .error
+                                .as_deref()
+                                .unwrap_or("hook denied timeout"),
+                        )
+                        .await;
+                    return Ok(RuntimeExecuteResult {
+                        content: format!(
+                            "Execution blocked by Timeout hook: {}",
+                            kill_outcome
+                                .error
+                                .clone()
+                                .or_else(|| on_timeout_outcome.error.clone())
+                                .unwrap_or_else(|| "hook denied timeout".to_string())
+                        ),
+                        guard_report: RuntimeGuardReport {
+                            decision: GuardDecision::Blocked,
+                            attempts_allowed: 0,
+                            timeout_secs: envelope.constraints.timeout_ms / 1000,
+                            reason: "prompt timeout hook blocked execution".into(),
+                            breaker_key: format!("{actor_id}:{capability_id}"),
+                            sandbox_policy: None,
+                        },
+                        provider_response: Some(response.clone()),
+                        estimated_prompt_tokens: Some(estimated_prompt_tokens),
+                    });
+                }
+            }
+            let on_result_outcome = {
+                let hooks = self.hook_runtime.lock().await;
+                hooks.apply_return_with_channel(
+                    HookChannel::Prompt,
+                    hook_target,
+                    &post_hook_outcome.arguments,
+                    &content,
+                )
+            };
+            self.record_hook_evidence(db, envelope, "return", &on_result_outcome)
+                .await;
+            if !on_result_outcome.allowed {
+                let kill_outcome = self
+                    .apply_kill_hook(
+                        db,
+                        envelope,
+                        HookChannel::Prompt,
+                        hook_target,
+                        &post_hook_outcome.arguments,
+                        on_result_outcome
+                            .error
+                            .as_deref()
+                            .unwrap_or("hook denied on_result"),
+                    )
+                    .await;
+                return Ok(RuntimeExecuteResult {
+                    content: format!(
+                        "Execution blocked by OnResult hook: {}",
+                        kill_outcome
+                            .error
+                            .clone()
+                            .or_else(|| on_result_outcome.error.clone())
+                            .unwrap_or_else(|| "hook denied on_result".to_string())
+                    ),
+                    guard_report: RuntimeGuardReport {
+                        decision: GuardDecision::Blocked,
+                        attempts_allowed: 0,
+                        timeout_secs: envelope.constraints.timeout_ms / 1000,
+                        reason: "prompt on_result hook blocked execution".into(),
+                        breaker_key: format!("{actor_id}:{capability_id}"),
+                        sandbox_policy: None,
+                    },
+                    provider_response: Some(response),
+                    estimated_prompt_tokens: Some(estimated_prompt_tokens),
+                });
+            } else if let Some(rewritten) = on_result_outcome.output.clone() {
+                content = rewritten;
+            }
+
             let duration_ms = current_time_ms().saturating_sub(started_at_ms);
             let cost_breakdown = if let Some(reservation) = reservation.as_ref() {
                 self.settle_budget(
@@ -953,7 +2054,7 @@ impl RuntimeKernel {
                     Some(&traced_response.route.model),
                     "provider",
                     &envelope.payload,
-                    &response.content.clone().unwrap_or_default(),
+                    &content,
                     vec![
                         ArtifactDigest {
                             name: "provider_input".into(),
@@ -963,7 +2064,7 @@ impl RuntimeKernel {
                         ArtifactDigest {
                             name: "provider_output".into(),
                             algorithm: "siphash64".into(),
-                            digest: digest_text(&response.content.clone().unwrap_or_default()),
+                            digest: digest_text(&content),
                         },
                     ],
                     DeterminismBoundary {
@@ -988,7 +2089,7 @@ impl RuntimeKernel {
                 )
                 .await;
             return Ok(RuntimeExecuteResult {
-                content: response.content.clone().unwrap_or_default(),
+                content,
                 guard_report: RuntimeGuardReport {
                     decision: GuardDecision::Allow,
                     attempts_allowed: 1,
@@ -1002,14 +2103,70 @@ impl RuntimeKernel {
             });
         }
 
+
+        let (_parallel_guard, parallel_budget_window) =
+            match self.try_enter_parallel_tool_window(&envelope.session_id.to_string()) {
+                Ok((guard, active, limit)) => (Some(guard), Some((active, limit))),
+                Err(error) => {
+                    let reason = error.to_string();
+                    let _ = append_event(
+                        db,
+                        "runtime_blocks",
+                        envelope.trace_id.to_string(),
+                        envelope.session_id.to_string(),
+                        Some(envelope.task_id.to_string()),
+                        Some(envelope.capability_id.to_string()),
+                        self.effective_contract_version(),
+                        serde_json::json!({
+                            "reason": reason,
+                            "tenant_id": &envelope.identity.tenant_id,
+                            "principal_id": &envelope.identity.principal_id,
+                            "policy_id": &envelope.identity.policy_id,
+                            "parallel_limit": self.max_parallel_tool_window(),
+                        }),
+                    )
+                    .await;
+                    return Ok(RuntimeExecuteResult {
+                        content: format!("Execution blocked by runtime guard: {}", reason),
+                        guard_report: RuntimeGuardReport {
+                            decision: GuardDecision::Blocked,
+                            attempts_allowed: 0,
+                            timeout_secs: envelope.constraints.timeout_ms / 1000,
+                            reason,
+                            breaker_key: format!("parallel-budget:{}", envelope.session_id),
+                            sandbox_policy: None,
+                        },
+                        provider_response: None,
+                        estimated_prompt_tokens: None,
+                    });
+                }
+            };
         let tool_name = capability_id;
+        let raw_tool_arguments = extract_tool_arguments(&envelope.payload)?;
+        let hook_channel = infer_hook_channel(tool_name, manifest, &raw_tool_arguments);
+        let pre_hook_outcome = {
+            let hooks = self.hook_runtime.lock().await;
+            hooks.apply_before_with_channel(hook_channel.clone(), tool_name, &raw_tool_arguments)
+        };
+        self.record_hook_evidence(db, envelope, "before", &pre_hook_outcome)
+            .await;
+        let mut effective_tool_arguments = pre_hook_outcome.arguments.clone();
         let mut guard = self
             .guard_tool_execution_with_state(db, actor_id, tool_name, manifest)
             .await?;
+        if !pre_hook_outcome.allowed {
+            guard.decision = GuardDecision::Blocked;
+            guard.attempts_allowed = 0;
+            guard.reason = format!(
+                "execution denied by PreToolUse hook: {}",
+                pre_hook_outcome
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "hook denied pre_tool_use".to_string())
+            );
+        }
 
-        if envelope.constraints.requires_human_approval
-            && guard.decision == GuardDecision::Allow
-        {
+        if envelope.constraints.requires_human_approval && guard.decision == GuardDecision::Allow {
             guard.decision = GuardDecision::RequiresApproval;
             guard.reason = "TaskEnvelope requires human approval".into();
         }
@@ -1017,73 +2174,260 @@ impl RuntimeKernel {
         let original_decision = guard.decision.clone();
         let enforced = self.should_enforce_gate(&envelope.session_id, &envelope.task_id);
         if !enforced && guard.decision != GuardDecision::Allow {
-            guard.decision = GuardDecision::Allow;
-            guard.reason = format!(
-                "shadow-observe-only (original decision {:?})",
-                original_decision
-            );
+            let hard_hook_block = guard.reason.contains("PreToolUse hook")
+                || guard.reason.contains("step")
+                || guard.reason.contains("OnResult hook");
+            if !hard_hook_block {
+                guard.decision = GuardDecision::Allow;
+                guard.reason = format!(
+                    "shadow-observe-only (original decision {:?})",
+                    original_decision
+                );
+            } else {
+                guard.reason = format!("hard-hook-gate (shadow bypass disabled): {}", guard.reason);
+            }
         }
 
+        if guard.reason.contains("permission mode") {
+            let _ = append_event(
+                db,
+                "policy_reject",
+                envelope.trace_id.to_string(),
+                envelope.session_id.to_string(),
+                Some(envelope.task_id.to_string()),
+                Some(envelope.capability_id.to_string()),
+                self.effective_contract_version(),
+                serde_json::json!({
+                    "reason": guard.reason.clone(),
+                    "decision": format!("{:?}", guard.decision),
+                    "tenant_id": &envelope.identity.tenant_id,
+                    "principal_id": &envelope.identity.principal_id,
+                    "policy_id": &envelope.identity.policy_id,
+                }),
+            )
+            .await;
+        }
         let content_result: Result<String> = match guard.decision {
             GuardDecision::Blocked => {
-                Ok(format!("Execution blocked by runtime guard: {}", guard.reason))
-            }
-            GuardDecision::RequiresApproval => {
+                let kill_outcome = self
+                    .apply_kill_hook(
+                        db,
+                        envelope,
+                        hook_channel.clone(),
+                        tool_name,
+                        &effective_tool_arguments,
+                        &guard.reason,
+                    )
+                    .await;
                 Ok(format!(
-                    "Execution requires approval before running {}: {}",
-                    tool_name, guard.reason
+                    "Execution blocked by runtime guard: {}",
+                    kill_outcome
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| guard.reason.clone())
                 ))
             }
+            GuardDecision::RequiresApproval => Ok(format!(
+                "Execution requires approval before running {}: {}",
+                tool_name, guard.reason
+            )),
             GuardDecision::Allow => {
-                let arguments_result: Result<String> = if let Some(text) = envelope.payload.as_str() {
-                    Ok(text.to_string())
-                } else {
-                    serde_json::to_string(&envelope.payload).map_err(anyhow::Error::from)
-                };
-                match arguments_result {
-                    Ok(arguments) => {
-                        if let Some(manifest) = manifest {
-                            if tools.allow_shell {
-                                let mut policy = self.sandbox_policy_for(tool_name, manifest);
-                                policy.cpu_budget_ms = envelope.constraints.timeout_ms;
-                                policy.memory_budget_mb = envelope.constraints.max_memory_mb;
-                                if !envelope.constraints.io_allow_paths.is_empty() {
-                                    policy.filesystem_allow = envelope.constraints.io_allow_paths.clone();
-                                }
-                                if !envelope.constraints.io_deny_paths.is_empty() {
-                                    policy.filesystem_deny = envelope.constraints.io_deny_paths.clone();
-                                }
-                                guard.sandbox_policy = Some(policy.clone());
-                                match self
-                                    .execute_sandboxed_manifest(manifest, &arguments, &policy)
-                                    .await
-                                {
-                                    Ok(executed) => serde_json::to_string(&executed)
-                                        .map_err(anyhow::Error::from),
-                                    Err(error) => Err(error),
-                                }
-                            } else {
-                                tools
-                                    .execute(tool_name, &arguments)
-                                    .await
-                                    .map(|result| result.content)
-                            }
+                if matches!(runtime_class, RuntimeClass::TrustedHighRisk) {
+                    if let Err(error) = self
+                        .trusted_high_risk_preflight(db, envelope, preferred_model)
+                        .await
+                    {
+                        guard.decision = GuardDecision::Blocked;
+                        guard.attempts_allowed = 0;
+                        guard.reason = format!(
+                            "trusted high-risk preflight rejected execution: {}",
+                            error
+                        );
+                        Ok(format!("Execution blocked by runtime guard: {}", guard.reason))
+                    } else {
+                        let post_hook_outcome = {
+                            let hooks = self.hook_runtime.lock().await;
+                            hooks.apply_step_with_channel(hook_channel.clone(), tool_name, &effective_tool_arguments)
+                        };
+                        self.record_hook_evidence(db, envelope, "step", &post_hook_outcome)
+                            .await;
+                        if !post_hook_outcome.allowed {
+                            Err(anyhow::anyhow!(
+                                post_hook_outcome
+                                    .error
+                                    .clone()
+                                    .unwrap_or_else(|| "hook denied post_tool_use".to_string())
+                            ))
                         } else {
-                            tools
-                                .execute(tool_name, &arguments)
-                                .await
-                                .map(|result| result.content)
+                        effective_tool_arguments = post_hook_outcome.arguments.clone();
+                        let arguments = effective_tool_arguments.clone();
+                        let classified = self
+                            .execute_classified_tool_path(
+                                runtime_class.clone(),
+                                db,
+                                tools,
+                                envelope,
+                                capability_id,
+                                tool_name,
+                                manifest,
+                                &arguments,
+                                &mut guard,
+                            )
+                            .await;
+
+                        match classified {
+                            Ok(classified) => {
+                                if guard.sandbox_policy.is_none() {
+                                    guard.sandbox_policy = classified.sandbox_policy;
+                                }
+                                let stream_outcome = self
+                                    .apply_stream_hook(
+                                        db,
+                                        envelope,
+                                        hook_channel.clone(),
+                                        tool_name,
+                                        &arguments,
+                                        &classified.content,
+                                    )
+                                    .await;
+                                if !stream_outcome.allowed {
+                                    let _ = self
+                                        .apply_kill_hook(
+                                            db,
+                                            envelope,
+                                            hook_channel.clone(),
+                                            tool_name,
+                                            &arguments,
+                                            stream_outcome
+                                                .error
+                                                .as_deref()
+                                                .unwrap_or("hook denied stream"),
+                                        )
+                                        .await;
+                                    Err(anyhow::anyhow!(
+                                        stream_outcome
+                                            .error
+                                            .clone()
+                                            .unwrap_or_else(|| "hook denied stream".to_string())
+                                    ))
+                                } else {
+                                    Ok(stream_outcome
+                                        .output
+                                        .clone()
+                                        .unwrap_or(classified.content))
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
                         }
                     }
-                    Err(error) => Err(error),
+                } else {
+                    let post_hook_outcome = {
+                        let hooks = self.hook_runtime.lock().await;
+                        hooks.apply_step_with_channel(hook_channel.clone(), tool_name, &effective_tool_arguments)
+                    };
+                    self.record_hook_evidence(db, envelope, "step", &post_hook_outcome)
+                        .await;
+                    if !post_hook_outcome.allowed {
+                        Err(anyhow::anyhow!(
+                            post_hook_outcome
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "hook denied post_tool_use".to_string())
+                        ))
+                    } else {
+                    effective_tool_arguments = post_hook_outcome.arguments.clone();
+                    let arguments = effective_tool_arguments.clone();
+                    let classified = self
+                        .execute_classified_tool_path(
+                            runtime_class.clone(),
+                            db,
+                            tools,
+                            envelope,
+                            capability_id,
+                            tool_name,
+                            manifest,
+                            &arguments,
+                            &mut guard,
+                        )
+                        .await;
+
+                    match classified {
+                        Ok(classified) => {
+                            if guard.sandbox_policy.is_none() {
+                                guard.sandbox_policy = classified.sandbox_policy;
+                            }
+                            let stream_outcome = self
+                                .apply_stream_hook(
+                                    db,
+                                    envelope,
+                                    hook_channel.clone(),
+                                    tool_name,
+                                    &arguments,
+                                    &classified.content,
+                                )
+                                .await;
+                            if !stream_outcome.allowed {
+                                let _ = self
+                                    .apply_kill_hook(
+                                        db,
+                                        envelope,
+                                        hook_channel.clone(),
+                                        tool_name,
+                                        &arguments,
+                                        stream_outcome
+                                            .error
+                                            .as_deref()
+                                            .unwrap_or("hook denied stream"),
+                                    )
+                                    .await;
+                                Err(anyhow::anyhow!(
+                                    stream_outcome
+                                        .error
+                                        .clone()
+                                        .unwrap_or_else(|| "hook denied stream".to_string())
+                                ))
+                            } else {
+                                Ok(stream_outcome
+                                    .output
+                                    .clone()
+                                    .unwrap_or(classified.content))
+                            }
+                        }
+                        Err(error) => Err(error),
+                    }
+                    }
                 }
             }
         };
-        let content = match content_result {
+        let mut content = match content_result {
             Ok(content) => content,
             Err(error) => {
+                let on_error_outcome = {
+                    let hooks = self.hook_runtime.lock().await;
+                    hooks.apply_throws_with_channel(hook_channel.clone(), tool_name, &effective_tool_arguments, &error.to_string())
+                };
+                self.record_hook_evidence(db, envelope, "throws", &on_error_outcome)
+                    .await;
+                let error_text = on_error_outcome
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| error.to_string());
+                if is_timeout_signal(&error_text) {
+                    let on_timeout_outcome = {
+                        let hooks = self.hook_runtime.lock().await;
+                        hooks.apply_timeout_with_channel(
+                            hook_channel.clone(),
+                            tool_name,
+                            &effective_tool_arguments,
+                            &error_text,
+                        )
+                    };
+                    self.record_hook_evidence(db, envelope, "timeout", &on_timeout_outcome)
+                        .await;
+                }
                 if capability_id.starts_with("mcp::") {
-                    let reason = format!("mcp execution failed: {error}");
+                    let reason = format!("mcp execution failed: {error_text}");
                     let _ = self
                         .apply_degrade_profile(
                             db,
@@ -1102,14 +2446,23 @@ impl RuntimeKernel {
                         )
                         .await;
                     if let Some(reservation) = reservation.as_ref() {
-                        self
-                            .rollback_budget(db, envelope, reservation, "mcp_execution_error")
+                        self.rollback_budget(db, envelope, reservation, "mcp_execution_error")
                             .await?;
                     }
+                    let _ = self
+                        .apply_kill_hook(
+                            db,
+                            envelope,
+                            hook_channel.clone(),
+                            tool_name,
+                            &effective_tool_arguments,
+                            &error_text,
+                        )
+                        .await;
                     return Ok(RuntimeExecuteResult {
                         content: format!(
                             "mcp degraded mode activated due to failure; execution paused: {}",
-                            error
+                            error_text
                         ),
                         guard_report: RuntimeGuardReport {
                             decision: GuardDecision::RequiresApproval,
@@ -1124,13 +2477,90 @@ impl RuntimeKernel {
                     });
                 }
                 if let Some(reservation) = reservation.as_ref() {
-                    self
-                        .rollback_budget(db, envelope, reservation, "execution_error")
+                    self.rollback_budget(db, envelope, reservation, "execution_error")
                         .await?;
                 }
-                return Err(error);
+                let _ = self
+                    .apply_kill_hook(
+                        db,
+                        envelope,
+                        hook_channel.clone(),
+                        tool_name,
+                        &effective_tool_arguments,
+                        &error_text,
+                    )
+                    .await;
+                return Err(anyhow::anyhow!(error_text));
             }
         };
+        if is_timeout_signal(&content) {
+            let on_timeout_outcome = {
+                let hooks = self.hook_runtime.lock().await;
+                hooks.apply_timeout_with_channel(
+                    hook_channel.clone(),
+                    tool_name,
+                    &effective_tool_arguments,
+                    &content,
+                )
+            };
+            self.record_hook_evidence(db, envelope, "timeout", &on_timeout_outcome)
+                .await;
+            if !on_timeout_outcome.allowed {
+                let _ = self
+                    .apply_kill_hook(
+                        db,
+                        envelope,
+                        hook_channel.clone(),
+                        tool_name,
+                        &effective_tool_arguments,
+                        on_timeout_outcome
+                            .error
+                            .as_deref()
+                            .unwrap_or("hook denied timeout"),
+                    )
+                    .await;
+                guard.decision = GuardDecision::Blocked;
+                guard.reason = on_timeout_outcome
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "hook denied timeout".to_string());
+                content = format!("Execution blocked by Timeout hook: {}", guard.reason);
+            }
+        }
+        let on_result_outcome = {
+            let hooks = self.hook_runtime.lock().await;
+            hooks.apply_return_with_channel(
+                hook_channel.clone(),
+                tool_name,
+                &effective_tool_arguments,
+                &content,
+            )
+        };
+        self.record_hook_evidence(db, envelope, "return", &on_result_outcome)
+            .await;
+        if !on_result_outcome.allowed {
+            let _ = self
+                .apply_kill_hook(
+                    db,
+                    envelope,
+                    hook_channel.clone(),
+                    tool_name,
+                    &effective_tool_arguments,
+                    on_result_outcome
+                        .error
+                        .as_deref()
+                        .unwrap_or("hook denied on_result"),
+                )
+                .await;
+            guard.decision = GuardDecision::Blocked;
+            guard.reason = on_result_outcome
+                .error
+                .clone()
+                .unwrap_or_else(|| "hook denied on_result".to_string());
+            content = format!("Execution blocked by OnResult hook: {}", guard.reason);
+        } else if let Some(rewritten) = on_result_outcome.output.clone() {
+            content = rewritten;
+        }
         let duration_ms = current_time_ms().saturating_sub(started_at_ms);
         let cost_breakdown = if let Some(reservation) = reservation.as_ref() {
             match guard.decision {
@@ -1176,6 +2606,7 @@ impl RuntimeKernel {
                 "policy_id": &envelope.identity.policy_id,
                 "lease_token": &envelope.identity.lease_token,
                 "cost_breakdown": cost_breakdown,
+                "parallel_tool_window": parallel_budget_window.map(|(active, limit)| serde_json::json!({ "active": active, "limit": limit })),
             }),
         )
         .await;
@@ -1191,7 +2622,7 @@ impl RuntimeKernel {
                 digest: digest_text(&content),
             },
         ];
-        let determinism_boundary = if tools.allow_shell {
+        let determinism_boundary = if matches!(runtime_class, RuntimeClass::ToolSandboxed) {
             DeterminismBoundary {
                 mode: "best_effort".into(),
                 locked_fields: vec![
@@ -1247,7 +2678,7 @@ impl RuntimeKernel {
     #[allow(dead_code)]
     pub async fn execute_provider(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         tools: &ToolRegistry,
         providers: &ProviderRegistry,
         envelope: &TaskEnvelope,
@@ -1268,19 +2699,28 @@ impl RuntimeKernel {
         .await
     }
 
-    pub async fn active_degrade_profile(&self, db: &SpacetimeDb, session_id: &str) -> Result<Option<DegradeProfile>> {
+    pub async fn active_degrade_profile(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+    ) -> Result<Option<DegradeProfile>> {
         let now = current_time_ms();
         let profile = db
             .get_knowledge(&format!("runtime:degrade:{session_id}:active"))
             .await?
             .and_then(|record| serde_json::from_str::<DegradeProfile>(&record.value).ok())
-            .filter(|profile| profile.expires_at_ms.map(|expires| expires > now).unwrap_or(true));
+            .filter(|profile| {
+                profile
+                    .expires_at_ms
+                    .map(|expires| expires > now)
+                    .unwrap_or(true)
+            });
         Ok(profile)
     }
 
     pub async fn apply_degrade_profile(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         trigger: &str,
         profile_kind: DegradeProfileKind,
@@ -1335,7 +2775,7 @@ impl RuntimeKernel {
 
     pub async fn recover_from_degrade(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         reason: &str,
     ) -> Result<Option<FailoverRecord>> {
@@ -1394,7 +2834,7 @@ impl RuntimeKernel {
 
     pub async fn build_recovery_plan(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         trigger: &str,
         profile: DegradeProfileKind,
@@ -1435,7 +2875,10 @@ impl RuntimeKernel {
             profile,
             trigger: trigger.to_string(),
             steps,
-            cooldown_ms: self.mcp.tool_breaker_cooldown_ms.max(self.mcp.mcp_breaker_cooldown_ms),
+            cooldown_ms: self
+                .mcp
+                .tool_breaker_cooldown_ms
+                .max(self.mcp.mcp_breaker_cooldown_ms),
             auto_recover_enabled: true,
             created_at_ms: now,
         };
@@ -1448,7 +2891,12 @@ impl RuntimeKernel {
         Ok(plan)
     }
 
-    pub async fn run_chaos_case(&self, db: &SpacetimeDb, session_id: &str, case: ChaosCase) -> Result<FailoverRecord> {
+    pub async fn run_chaos_case(
+        &self,
+        db: &StateStore,
+        session_id: &str,
+        case: ChaosCase,
+    ) -> Result<FailoverRecord> {
         let trigger = format!("chaos:{}:{}", case.case_id, case.injected_at_ms);
         db.upsert_json_knowledge(
             format!("runtime:chaos:{session_id}:{}", case.case_id),
@@ -1483,7 +2931,9 @@ impl RuntimeKernel {
                 kind,
                 reason: reason.to_string(),
                 activated_at_ms: now,
-                expires_at_ms: Some(now.saturating_add(self.mcp.tool_breaker_cooldown_ms.max(30_000))),
+                expires_at_ms: Some(
+                    now.saturating_add(self.mcp.tool_breaker_cooldown_ms.max(30_000)),
+                ),
                 max_parallel_agents_override: Some(self.limits.max_parallel_agents.min(2)),
                 allow_provider_calls: true,
                 allow_mcp_calls: true,
@@ -1495,7 +2945,9 @@ impl RuntimeKernel {
                 kind,
                 reason: reason.to_string(),
                 activated_at_ms: now,
-                expires_at_ms: Some(now.saturating_add(self.mcp.mcp_breaker_cooldown_ms.max(30_000))),
+                expires_at_ms: Some(
+                    now.saturating_add(self.mcp.mcp_breaker_cooldown_ms.max(30_000)),
+                ),
                 max_parallel_agents_override: Some(self.limits.max_parallel_agents.min(2)),
                 allow_provider_calls: true,
                 allow_mcp_calls: false,
@@ -1520,7 +2972,9 @@ impl RuntimeKernel {
                 reason: reason.to_string(),
                 activated_at_ms: now,
                 expires_at_ms: Some(now.saturating_add(120_000)),
-                max_parallel_agents_override: Some(self.limits.max_parallel_agents.saturating_div(2).max(1)),
+                max_parallel_agents_override: Some(
+                    self.limits.max_parallel_agents.saturating_div(2).max(1),
+                ),
                 allow_provider_calls: true,
                 allow_mcp_calls: true,
                 read_only_mode: false,
@@ -1555,7 +3009,7 @@ impl RuntimeKernel {
 
     async fn record_replay_snapshot(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         actor_id: &str,
         envelope: &TaskEnvelope,
         preferred_model: Option<&str>,
@@ -1613,7 +3067,7 @@ impl RuntimeKernel {
 
     pub async fn replay_from_snapshot(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         tools: &ToolRegistry,
         providers: &ProviderRegistry,
         request: &ReplayRunRequest,
@@ -1693,7 +3147,7 @@ impl RuntimeKernel {
                 } else {
                     "medium".into()
                 },
-                explanation: "Runtime replay produced a different output hash for the same snapshot input."
+                explanation: format!("replay mismatch under boundary={} (output hash changed for same snapshot input)", snapshot.boundary.mode)
                     .into(),
             });
         }
@@ -1703,7 +3157,8 @@ impl RuntimeKernel {
                 expected: snapshot.route_model.clone().unwrap_or_default(),
                 actual: "changed".into(),
                 severity: "medium".into(),
-                explanation: "Provider route model differs from the original snapshot route.".into(),
+                explanation: "Provider route model differs from the original snapshot route."
+                    .into(),
             });
         }
         let deterministic_boundary_respected = if snapshot.boundary.mode == "strict" {
@@ -1785,7 +3240,7 @@ impl RuntimeKernel {
 
     async fn precharge_budget(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         envelope: &TaskEnvelope,
         estimated_tokens: u32,
     ) -> Result<Option<BudgetReservation>> {
@@ -1831,7 +3286,9 @@ impl RuntimeKernel {
         let account_remaining = account
             .total_budget_micros
             .saturating_sub(account.spent_micros.saturating_add(account.reserved_micros));
-        let window_remaining = window.window_budget_micros.saturating_sub(window.consumed_micros);
+        let window_remaining = window
+            .window_budget_micros
+            .saturating_sub(window.consumed_micros);
         if estimated > account_remaining || estimated > window_remaining {
             account.blocked_count = account.blocked_count.saturating_add(1);
             account.updated_at_ms = now;
@@ -1843,9 +3300,7 @@ impl RuntimeKernel {
                 .append_spend_ledger(SpendLedger {
                     ledger_id: format!(
                         "blocked:{}:{}:{}",
-                        envelope.trace_id,
-                        envelope.task_id,
-                        now
+                        envelope.trace_id, envelope.task_id, now
                     ),
                     tenant_id: envelope.identity.tenant_id.clone(),
                     account_id: account_id.clone(),
@@ -1911,7 +3366,7 @@ impl RuntimeKernel {
 
     async fn settle_budget(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         envelope: &TaskEnvelope,
         reservation: &BudgetReservation,
         provider_tokens: u32,
@@ -1942,7 +3397,9 @@ impl RuntimeKernel {
         account.reserved_micros = account
             .reserved_micros
             .saturating_sub(reservation.reserved_micros);
-        account.spent_micros = account.spent_micros.saturating_add(breakdown.total_cost_micros);
+        account.spent_micros = account
+            .spent_micros
+            .saturating_add(breakdown.total_cost_micros);
         account.updated_at_ms = now;
         window.consumed_micros = window
             .consumed_micros
@@ -2018,7 +3475,7 @@ impl RuntimeKernel {
 
     async fn rollback_budget(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         envelope: &TaskEnvelope,
         reservation: &BudgetReservation,
         reason: &str,
@@ -2048,7 +3505,10 @@ impl RuntimeKernel {
         db.upsert_budget_account(account).await?;
         db.upsert_quota_window(window).await?;
         db.append_spend_ledger(SpendLedger {
-            ledger_id: format!("rollback:{}:{}:{}", envelope.trace_id, envelope.task_id, now),
+            ledger_id: format!(
+                "rollback:{}:{}:{}",
+                envelope.trace_id, envelope.task_id, now
+            ),
             tenant_id: reservation.tenant_id.clone(),
             account_id: reservation.account_id.clone(),
             session_id: envelope.session_id.to_string(),
@@ -2104,7 +3564,9 @@ impl RuntimeKernel {
     fn account_id_for(&self, envelope: &TaskEnvelope) -> String {
         format!(
             "{}:{}:{}",
-            envelope.identity.tenant_id, envelope.identity.principal_id, envelope.identity.policy_id
+            envelope.identity.tenant_id,
+            envelope.identity.principal_id,
+            envelope.identity.policy_id
         )
     }
 
@@ -2120,7 +3582,7 @@ impl RuntimeKernel {
 
     async fn validate_execution_identity(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         envelope: &TaskEnvelope,
     ) -> Result<()> {
         let tenant = db
@@ -2131,14 +3593,20 @@ impl RuntimeKernel {
             bail!("tenant is not active");
         }
         let principal = db
-            .get_principal(&envelope.identity.tenant_id, &envelope.identity.principal_id)
+            .get_principal(
+                &envelope.identity.tenant_id,
+                &envelope.identity.principal_id,
+            )
             .await?
             .ok_or_else(|| anyhow::anyhow!("principal not found"))?;
         if principal.status != "active" {
             bail!("principal is not active");
         }
         let role_binding = db
-            .get_role_binding(&envelope.identity.tenant_id, &envelope.identity.principal_id)
+            .get_role_binding(
+                &envelope.identity.tenant_id,
+                &envelope.identity.principal_id,
+            )
             .await?
             .ok_or_else(|| anyhow::anyhow!("role binding not found"))?;
         let policy = db
@@ -2243,7 +3711,9 @@ impl RuntimeKernel {
                 } else {
                     Some(format!(
                         "cooldown active for {} ms (failures: {})",
-                        state.cooldown_ms.saturating_sub(now_ms.saturating_sub(opened_at)),
+                        state
+                            .cooldown_ms
+                            .saturating_sub(now_ms.saturating_sub(opened_at)),
                         state.failure_count
                     ))
                 }
@@ -2253,7 +3723,7 @@ impl RuntimeKernel {
 
     async fn load_circuit_state(
         &self,
-        db: &SpacetimeDb,
+        db: &StateStore,
         key: &str,
     ) -> Result<Option<CircuitState>> {
         let state = db
@@ -2273,11 +3743,7 @@ impl RuntimeKernel {
         Ok(state)
     }
 
-    async fn persist_circuit_state(
-        &self,
-        db: &SpacetimeDb,
-        state: &CircuitState,
-    ) -> Result<()> {
+    async fn persist_circuit_state(&self, db: &StateStore, state: &CircuitState) -> Result<()> {
         db.upsert_knowledge(
             state.scope_key.clone(),
             serde_json::to_string(state)?,
@@ -2314,7 +3780,11 @@ impl RuntimeKernel {
         SandboxPolicy {
             filesystem_allow,
             filesystem_deny,
-            cpu_budget_ms: if manifest.risk == CapabilityRisk::High { 15_000 } else { 6_000 },
+            cpu_budget_ms: if manifest.risk == CapabilityRisk::High {
+                15_000
+            } else {
+                6_000
+            },
             memory_budget_mb: if manifest.risk == CapabilityRisk::High {
                 self.limits.max_memory_mb.min(768)
             } else {
@@ -2419,22 +3889,26 @@ impl RuntimeKernel {
         let task_score = average_score(task_judgements.iter().map(|item| item.score));
         let route_score = average_score(route_reports.iter().map(|item| item.score));
         let acceptance_coverage = acceptance_coverage(brief, reports);
-        let overall_score = ((task_score + route_score + acceptance_coverage + capability_regression.score)
-            / 4.0)
-            .clamp(0.0, 1.0);
+        let overall_score =
+            ((task_score + route_score + acceptance_coverage + capability_regression.score) / 4.0)
+                .clamp(0.0, 1.0);
 
         let mut recommended_actions = Vec::new();
         if acceptance_coverage < 0.8 {
-            recommended_actions.push("verifier: expand task evidence for frozen acceptance criteria".into());
+            recommended_actions
+                .push("verifier: expand task evidence for frozen acceptance criteria".into());
         }
         if route_score < 0.65 {
-            recommended_actions.push("verifier: audit route selection against catalog and graph signals".into());
+            recommended_actions
+                .push("verifier: audit route selection against catalog and graph signals".into());
         }
         if !capability_regression.all_passed {
-            recommended_actions.push("verifier: deprecate or roll back failing capabilities".into());
+            recommended_actions
+                .push("verifier: deprecate or roll back failing capabilities".into());
         }
         if routing.pending_event_count > 0 {
-            recommended_actions.push("verifier: drain pending scheduled events before completion".into());
+            recommended_actions
+                .push("verifier: drain pending scheduled events before completion".into());
         }
 
         let verdict = if !capability_regression.all_passed {
@@ -2518,22 +3992,26 @@ impl RuntimeKernel {
                     if report.task.role != "Execution" {
                         return true;
                     }
-                    tools.forged_tool_names().iter().any(|name| name == tool_name)
+                    tools
+                        .forged_tool_names()
+                        .iter()
+                        .any(|name| name == tool_name)
                         || tool_name == "cli::forge_mcp_tool"
                 });
                 let aligned_with_graph = match report.tool_used.as_deref() {
                     Some(tool_name) if tool_name == "cli::forge_mcp_tool" => {
-                        routing.forged_tool_coverage == 0 || routing.graph_signals.prefers_cli_execution
+                        routing.forged_tool_coverage == 0
+                            || routing.graph_signals.prefers_cli_execution
                     }
                     Some(tool_name) if tool_name.starts_with("mcp::") => {
-                        routing.graph_signals.prefers_mcp_execution || routing.forged_tool_coverage > 0
+                        routing.graph_signals.prefers_mcp_execution
+                            || routing.forged_tool_coverage > 0
                     }
                     Some(_) => routing.graph_signals.prefers_cli_execution,
                     None => true,
                 };
-                let guard_ok =
-                    report.guard_decision.eq_ignore_ascii_case("allow")
-                        || report.guard_decision.eq_ignore_ascii_case("provider");
+                let guard_ok = report.guard_decision.eq_ignore_ascii_case("allow")
+                    || report.guard_decision.eq_ignore_ascii_case("provider");
                 let mut score = 0.2f32;
                 if aligned_with_catalog {
                     score += 0.35;
@@ -2561,7 +4039,10 @@ impl RuntimeKernel {
             .collect()
     }
 
-    pub fn run_capability_regression_suite(&self, tools: &ToolRegistry) -> CapabilityRegressionSuite {
+    pub fn run_capability_regression_suite(
+        &self,
+        tools: &ToolRegistry,
+    ) -> CapabilityRegressionSuite {
         let cases = tools
             .manifests()
             .into_iter()
@@ -2575,7 +4056,10 @@ impl RuntimeKernel {
                 } else {
                     format!(
                         "status={:?} approval={:?} health={:.2} risk={:?}",
-                        manifest.status, manifest.approval_status, manifest.health_score, manifest.risk
+                        manifest.status,
+                        manifest.approval_status,
+                        manifest.health_score,
+                        manifest.risk
                     )
                 };
                 CapabilityRegressionCase {
@@ -2639,17 +4123,17 @@ fn resolve_working_directory(working_directory: Option<&str>) -> Result<PathBuf>
     Ok(absolute)
 }
 
-fn validate_command_spec(
-    spec: &RenderedCommandSpec,
-    policy: &SandboxPolicy,
-) -> Result<()> {
+fn validate_command_spec(spec: &RenderedCommandSpec, policy: &SandboxPolicy) -> Result<()> {
     let executable = spec.executable.to_ascii_lowercase();
     let blocked_executables = ["powershell", "pwsh", "cmd", "bash", "sh"];
     if blocked_executables
         .iter()
         .any(|blocked| executable.ends_with(blocked) || executable.contains(&format!("{blocked}.")))
     {
-        bail!("sandbox blocked interpreter-style executable: {}", spec.executable);
+        bail!(
+            "sandbox blocked interpreter-style executable: {}",
+            spec.executable
+        );
     }
 
     let denied_prefixes = policy
@@ -2659,7 +4143,10 @@ fn validate_command_spec(
         .collect::<Vec<_>>();
     for argument in &spec.args {
         let lowered = argument.to_ascii_lowercase();
-        if denied_prefixes.iter().any(|prefix| lowered.contains(prefix)) {
+        if denied_prefixes
+            .iter()
+            .any(|prefix| lowered.contains(prefix))
+        {
             bail!("sandbox blocked denied path-like argument: {argument}");
         }
     }
@@ -2667,31 +4154,35 @@ fn validate_command_spec(
 }
 
 fn enforce_working_directory_policy(path: &Path, policy: &SandboxPolicy) -> Result<()> {
-    let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     let allowed = policy.filesystem_allow.iter().any(|entry| {
         let candidate = entry.replace('\\', "/").to_ascii_lowercase();
         let candidate = candidate.trim_start_matches("./");
-        candidate.is_empty()
-            || normalized.contains(candidate)
-            || normalized.ends_with(candidate)
+        candidate.is_empty() || normalized.contains(candidate) || normalized.ends_with(candidate)
     });
     if !allowed {
-        bail!("sandbox blocked working directory outside allowlist: {}", path.display());
+        bail!(
+            "sandbox blocked working directory outside allowlist: {}",
+            path.display()
+        );
     }
     let denied = policy.filesystem_deny.iter().any(|entry| {
         let candidate = entry.replace('\\', "/").to_ascii_lowercase();
         normalized.contains(candidate.trim_start_matches("./"))
     });
     if denied {
-        bail!("sandbox blocked working directory inside denylist: {}", path.display());
+        bail!(
+            "sandbox blocked working directory inside denylist: {}",
+            path.display()
+        );
     }
     Ok(())
 }
 
-fn server_name_for(
-    tool_name: &str,
-    manifest: Option<&ForgedMcpToolManifest>,
-) -> Option<String> {
+fn server_name_for(tool_name: &str, manifest: Option<&ForgedMcpToolManifest>) -> Option<String> {
     manifest
         .map(|manifest| manifest.server.clone())
         .or_else(|| {
@@ -2721,6 +4212,123 @@ fn estimate_tokens(messages: &[ChatMessage]) -> u32 {
     ((total_chars as f32) / 4.0).ceil() as u32
 }
 
+fn compact_provider_messages_for_budget(
+    messages: &[ChatMessage],
+    max_tokens: u32,
+) -> Vec<ChatMessage> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+    if estimate_tokens(messages) <= max_tokens {
+        return messages.to_vec();
+    }
+
+    let max_chars = usize::try_from(max_tokens).unwrap_or(0).saturating_mul(4);
+    let mut compacted = Vec::new();
+    if let Some(system) = messages.iter().find(|message| message.role == "system") {
+        let clipped = truncate_chars(&system.content, max_chars / 4);
+        compacted.push(ChatMessage {
+            role: system.role.clone(),
+            content: clipped,
+        });
+    }
+
+    let recent_non_system = messages
+        .iter()
+        .filter(|message| message.role != "system")
+        .cloned()
+        .collect::<Vec<_>>();
+    let keep_recent = recent_non_system
+        .len()
+        .min(2)
+        .max(1);
+    let split_at = recent_non_system.len().saturating_sub(keep_recent);
+    let dropped = &recent_non_system[..split_at];
+    let tail = &recent_non_system[split_at..];
+
+    if !dropped.is_empty() {
+        let summary = dropped
+            .iter()
+            .take(8)
+            .map(|message| {
+                let compact = message.content.replace('\n', " ");
+                let clipped = compact.chars().take(96).collect::<String>();
+                format!("{}: {}", message.role, clipped)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        compacted.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: format!(
+                "[BudgetCompactionSummary] preserved most recent messages; prior context summary: {}",
+                summary
+            ),
+        });
+    }
+    compacted.extend_from_slice(tail);
+
+    if estimate_tokens(&compacted) <= max_tokens {
+        return compacted;
+    }
+
+    let mut hard_compacted = Vec::<ChatMessage>::new();
+    if let Some(system) = messages.iter().find(|message| message.role == "system") {
+        hard_compacted.push(ChatMessage {
+            role: "system".to_string(),
+            content: truncate_chars(
+                &system.content,
+                max_chars.saturating_mul(20).saturating_div(100),
+            ),
+        });
+    }
+    let latest_user = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .cloned()
+        .unwrap_or_else(|| ChatMessage {
+            role: "user".to_string(),
+            content: "budget compaction fallback request".to_string(),
+        });
+    hard_compacted.push(ChatMessage {
+        role: "user".to_string(),
+        content: truncate_chars(
+            &latest_user.content,
+            max_chars.saturating_mul(75).saturating_div(100),
+        ),
+    });
+
+    if estimate_tokens(&hard_compacted) <= max_tokens {
+        return hard_compacted;
+    }
+
+    vec![ChatMessage {
+        role: "user".to_string(),
+        content: truncate_chars(
+            &latest_user.content,
+            max_chars.saturating_mul(90).saturating_div(100),
+        ),
+    }]
+}
+
+fn truncate_chars(content: &str, max_chars: usize) -> String {
+    if max_chars == 0 || content.is_empty() {
+        return String::new();
+    }
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+    content.chars().take(max_chars).collect::<String>()
+}
+
+fn is_timeout_signal(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    lowered.contains("timeout")
+        || lowered.contains("timed_out")
+        || lowered.contains("deadline exceeded")
+        || lowered.contains("sandbox timeout exceeded")
+}
+
 fn fallback_provider_response(messages: &[ChatMessage], error: &str) -> LlmResponse {
     let user_text = messages
         .iter()
@@ -2731,8 +4339,7 @@ fn fallback_provider_response(messages: &[ChatMessage], error: &str) -> LlmRespo
     LlmResponse {
         content: Some(format!(
             "degraded-provider-fallback: temporarily unavailable upstream provider; partial response kept for availability. request=\"{}\" error=\"{}\"",
-            user_text,
-            error
+            user_text, error
         )),
         tool_calls: Vec::new(),
     }
@@ -2758,11 +4365,11 @@ fn acceptance_coverage(brief: &RequirementBrief, reports: &[ExecutionReport]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use autoloop_spacetimedb_adapter::{
-        PolicyBinding, Principal, RoleBinding, SessionLease, SpacetimeBackend, SpacetimeDbConfig,
+    use autoloop_state_adapter::{
+        PolicyBinding, Principal, RoleBinding, SessionLease, StateStoreBackend, StateStoreConfig,
         Tenant,
     };
+    use std::collections::HashMap;
 
     use crate::{
         config::AppConfig,
@@ -2772,11 +4379,18 @@ mod tests {
         },
         orchestration::{ExecutionReport, RequirementBrief, RoutingContext, SwarmTask},
         providers::{ChatMessage, ProviderRegistry},
-        tools::{ApprovalStatus, CapabilityRisk, CapabilityScope, CapabilityStatus, CliOutputMode, ForgedMcpToolManifest, TrustStatus},
+        tools::{
+            ApprovalStatus, CapabilityRisk, CapabilityScope, CapabilityStatus, CliOutputMode,
+            ForgedMcpToolManifest, TrustStatus,
+        },
     };
     use serde_json::json;
 
-    fn manifest(risk: CapabilityRisk, approval_status: ApprovalStatus, status: CapabilityStatus) -> ForgedMcpToolManifest {
+    fn manifest(
+        risk: CapabilityRisk,
+        approval_status: ApprovalStatus,
+        status: CapabilityStatus,
+    ) -> ForgedMcpToolManifest {
         ForgedMcpToolManifest {
             capability_id: "capability:test".into(),
             registered_tool_name: "mcp::local-mcp::test".into(),
@@ -2811,9 +4425,10 @@ mod tests {
     }
 
     async fn provision_identity(
-        db: &SpacetimeDb,
+        db: &StateStore,
         session_id: &str,
         tenant_id: &str,
+
         principal_id: &str,
         policy_id: &str,
         capability_prefixes: Vec<String>,
@@ -2874,6 +4489,35 @@ mod tests {
             policy_id: policy_id.into(),
             lease_token,
         }
+    }
+
+    #[test]
+    fn parallel_tool_call_budget_guard_blocks_when_limit_exceeded() {
+        let mut config = AppConfig::default();
+        config.runtime.max_parallel_agents = 4;
+        config.runtime.quota_window_budget_micros = 500;
+        config.runtime.budget_enforced = true;
+        let runtime = RuntimeKernel::from_config(&config.runtime);
+
+        let (guard, active, limit) = runtime
+            .try_enter_parallel_tool_window("session-parallel-guard")
+            .expect("first guard slot");
+        assert_eq!(active, 1);
+        assert_eq!(limit, 1, "budget-based parallel cap should clamp to one");
+
+        let blocked = runtime
+            .try_enter_parallel_tool_window("session-parallel-guard")
+            .expect_err("second concurrent slot should be blocked");
+        assert!(
+            blocked
+                .to_string()
+                .contains("parallel tool-call budget guard exceeded")
+        );
+
+        drop(guard);
+
+        let reopened = runtime.try_enter_parallel_tool_window("session-parallel-guard");
+        assert!(reopened.is_ok(), "slot should reopen after guard drop");
     }
 
     #[test]
@@ -3054,10 +4698,10 @@ mod tests {
         config.runtime.tool_breaker_failure_threshold = 2;
         config.runtime.tool_breaker_cooldown_ms = 60_000;
         let runtime = RuntimeKernel::from_config(&config.runtime);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3115,10 +4759,10 @@ mod tests {
         config.runtime.tool_breaker_failure_threshold = 1;
         config.runtime.tool_breaker_cooldown_ms = 1;
         let runtime = RuntimeKernel::from_config(&config.runtime);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3217,10 +4861,10 @@ mod tests {
         let runtime = RuntimeKernel::from_config(&AppConfig::default().runtime);
         let providers = ProviderRegistry::from_config(&AppConfig::default().providers);
         let tools = ToolRegistry::from_config(&AppConfig::default().tools);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3306,6 +4950,7 @@ mod tests {
                 sandbox_profile: "provider".into(),
                 requires_human_approval: false,
             },
+            trust_plan: None,
         };
 
         let error = runtime
@@ -3323,9 +4968,7 @@ mod tests {
             )
             .await
             .expect_err("token budget should block provider execution");
-        assert!(error
-            .to_string()
-            .contains("provider token budget exceeded"));
+        assert!(error.to_string().contains("provider token budget exceeded"));
     }
 
     #[tokio::test]
@@ -3333,10 +4976,10 @@ mod tests {
         let runtime = RuntimeKernel::from_config(&AppConfig::default().runtime);
         let providers = ProviderRegistry::from_config(&AppConfig::default().providers);
         let tools = ToolRegistry::from_config(&AppConfig::default().tools);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3413,6 +5056,7 @@ mod tests {
                 sandbox_profile: "deterministic".into(),
                 requires_human_approval: false,
             },
+            trust_plan: None,
         };
 
         runtime
@@ -3428,12 +5072,10 @@ mod tests {
             .await
             .expect("first execution");
 
-        let snapshots = crate::observability::event_stream::list_replay_snapshots(
-            &db,
-            "session-p10-replay",
-        )
-        .await
-        .expect("snapshots");
+        let snapshots =
+            crate::observability::event_stream::list_replay_snapshots(&db, "session-p10-replay")
+                .await
+                .expect("snapshots");
         let snapshot = snapshots.last().expect("at least one snapshot");
         let report = runtime
             .replay_from_snapshot(
@@ -3457,10 +5099,10 @@ mod tests {
         let runtime = RuntimeKernel::from_config(&AppConfig::default().runtime);
         let providers = ProviderRegistry::from_config(&AppConfig::default().providers);
         let tools = ToolRegistry::from_config(&AppConfig::default().tools);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3541,6 +5183,7 @@ mod tests {
                 sandbox_profile: "provider".into(),
                 requires_human_approval: false,
             },
+            trust_plan: None,
         };
 
         runtime
@@ -3555,12 +5198,10 @@ mod tests {
             )
             .await
             .expect("provider execution");
-        let snapshots = crate::observability::event_stream::list_replay_snapshots(
-            &db,
-            "session-p10-drift",
-        )
-        .await
-        .expect("snapshots");
+        let snapshots =
+            crate::observability::event_stream::list_replay_snapshots(&db, "session-p10-drift")
+                .await
+                .expect("snapshots");
         let mut snapshot = snapshots.last().expect("snapshot").clone();
         snapshot.output_digest = "forced-drift".into();
         crate::observability::event_stream::persist_replay_snapshot(&db, snapshot.clone())
@@ -3581,10 +5222,12 @@ mod tests {
 
         assert!(!report.matched);
         assert!(!report.deviations.is_empty());
-        assert!(report
-            .notes
-            .iter()
-            .any(|note| note.contains("external dependencies")));
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("external dependencies"))
+        );
     }
 
     #[tokio::test]
@@ -3595,10 +5238,10 @@ mod tests {
         provider_config.providers.mcp_servers.clear();
         let providers = ProviderRegistry::from_config(&provider_config.providers);
         let tools = ToolRegistry::from_config(&AppConfig::default().tools);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3634,6 +5277,7 @@ mod tests {
                 sandbox_profile: "provider".into(),
                 requires_human_approval: false,
             },
+            trust_plan: None,
         };
         let result = runtime
             .execute(
@@ -3647,9 +5291,7 @@ mod tests {
             )
             .await
             .expect("fallback result");
-        assert!(result
-            .content
-            .contains("degraded-provider-fallback"));
+        assert!(result.content.contains("degraded-provider-fallback"));
         let active = runtime
             .active_degrade_profile(&db, "session-p11-provider")
             .await
@@ -3665,10 +5307,10 @@ mod tests {
         cfg.tools.allow_shell = true;
         let tools = ToolRegistry::from_config(&cfg.tools);
         let providers = ProviderRegistry::from_config(&cfg.providers);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3714,6 +5356,7 @@ mod tests {
                 sandbox_profile: "mcp".into(),
                 requires_human_approval: false,
             },
+            trust_plan: None,
         };
         let result = runtime
             .execute(
@@ -3727,9 +5370,7 @@ mod tests {
             )
             .await
             .expect("degraded result");
-        assert!(result
-            .content
-            .contains("mcp degraded mode activated"));
+        assert!(result.content.contains("mcp degraded mode activated"));
         let active = runtime
             .active_degrade_profile(&db, "session-p11-mcp")
             .await
@@ -3741,10 +5382,10 @@ mod tests {
     #[tokio::test]
     async fn p11_recover_marks_failover_with_mttr() {
         let runtime = RuntimeKernel::from_config(&AppConfig::default().runtime);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3771,10 +5412,10 @@ mod tests {
     #[tokio::test]
     async fn p11_chaos_case_records_failover() {
         let runtime = RuntimeKernel::from_config(&AppConfig::default().runtime);
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
@@ -3788,7 +5429,7 @@ mod tests {
                     name: "db unavailable".into(),
                     fault: "db_unavailable".into(),
                     expected_profile: DegradeProfileKind::ReadOnly,
-                    target: "spacetimedb".into(),
+                    target: "state_store".into(),
                     injected_at_ms: current_time_ms(),
                 },
             )
@@ -3802,4 +5443,269 @@ mod tests {
             .expect("profile");
         assert!(profile.read_only_mode);
     }
+
+    #[tokio::test]
+    async fn tag_external_stage_writes_tagger_and_ledger_records() {
+        let runtime = RuntimeKernel::from_config(&AppConfig::default().runtime);
+        let db = StateStore::from_config(&StateStoreConfig {
+            enabled: true,
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
+            module_name: "autoloop_core".into(),
+            namespace: "autoloop".into(),
+            pool_size: 4,
+        });
+
+        let tag_ref = runtime
+            .tag_external_stage(
+                &db,
+                "session-runtime-tag",
+                "trace-runtime-tag",
+                Some("task-runtime-tag"),
+                Some("cap-runtime-tag"),
+                EvidenceTagStage::Verify,
+                "runtime.verify.sample",
+                serde_json::json!({"rule_id":"inv-sample","policy_version":"v2"}),
+            )
+            .await
+            .expect("tag");
+
+        let tag = db
+            .get_knowledge(&tag_ref)
+            .await
+            .expect("get tag")
+            .expect("tag exists");
+        assert!(tag.value.contains("runtime.verify.sample"));
+
+        let stages = db
+            .list_knowledge_by_prefix("evidence:stage:session-runtime-tag:trace-runtime-tag:")
+            .await
+            .expect("stages");
+        assert!(!stages.is_empty(), "expected evidence stage chain records");
+    }
 }
+
+async fn json_allow_from_knowledge(db: &StateStore, key: &str) -> Result<bool> {
+    let value = db.get_knowledge(key).await?;
+    let Some(record) = value else {
+        return Ok(false);
+    };
+    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&record.value) {
+        return Ok(
+            raw.get("allow")
+                .and_then(|v| v.as_bool())
+                .or_else(|| raw.get("allowed").and_then(|v| v.as_bool()))
+                .or_else(|| raw.get("approved").and_then(|v| v.as_bool()))
+                .unwrap_or(false),
+        );
+    }
+    Ok(false)
+}
+fn infer_hook_channel(
+    capability_id: &str,
+    manifest: Option<&ForgedMcpToolManifest>,
+    arguments: &str,
+) -> HookChannel {
+    let lowered_capability = capability_id.to_ascii_lowercase();
+    let lowered_args = arguments.to_ascii_lowercase();
+
+    if lowered_capability.starts_with("provider:") {
+        return HookChannel::Prompt;
+    }
+    if lowered_capability.starts_with("agent:")
+        || lowered_capability.starts_with("agent::")
+        || lowered_capability.contains("delegate")
+    {
+        return HookChannel::Agent;
+    }
+    if lowered_capability.starts_with("http:")
+        || lowered_capability.starts_with("http::")
+        || lowered_capability.contains("webhook")
+        || lowered_args.contains("https://")
+        || lowered_args.contains("http://")
+        || manifest
+            .and_then(|value| Some(value.server.to_ascii_lowercase()))
+            .is_some_and(|server| server.contains("http"))
+    {
+        return HookChannel::Http;
+    }
+
+    HookChannel::Command
+}
+
+fn parse_hook_prompt_messages(arguments: &str, fallback: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    if arguments.trim().is_empty() {
+        return fallback;
+    }
+
+    if let Ok(parsed) = serde_json::from_str::<Vec<ChatMessage>>(arguments) {
+        return parsed;
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+        if let Some(messages) = value.get("messages") {
+            if let Ok(parsed) = serde_json::from_value::<Vec<ChatMessage>>(messages.clone()) {
+                return parsed;
+            }
+        }
+        if let Some(text) = value.as_str() {
+            return vec![ChatMessage {
+                role: "user".into(),
+                content: text.to_string(),
+            }];
+        }
+    }
+
+    if arguments.len() < 4096 {
+        return vec![ChatMessage {
+            role: "user".into(),
+            content: arguments.to_string(),
+        }];
+    }
+
+    fallback
+}
+
+fn validate_hardgate_requirement(payload: &serde_json::Value) -> Option<String> {
+    let object = payload.as_object()?;
+    let required = object
+        .get("hardgate_required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !required {
+        return None;
+    }
+    let token = object
+        .get("hardgate_pass_token")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Some("hardgate_pass_token missing while hardgate_required=true".into());
+    }
+    if !token.starts_with("hgt:") {
+        return Some("hardgate_pass_token format invalid".into());
+    }
+    if token.len() < 12 {
+        return Some("hardgate_pass_token too short".into());
+    }
+    None
+}
+
+fn extract_provider_messages(payload: &serde_json::Value) -> Result<Vec<ChatMessage>> {
+    if let Some(map) = payload.as_object() {
+        if let Some(messages_value) = map.get("messages") {
+            if let Ok(messages) = serde_json::from_value::<Vec<ChatMessage>>(messages_value.clone())
+            {
+                return Ok(messages);
+            }
+        }
+    }
+    if let Ok(messages) = serde_json::from_value::<Vec<ChatMessage>>(payload.clone()) {
+        return Ok(messages);
+    }
+    if let Some(text) = payload.as_str() {
+        return Ok(vec![ChatMessage {
+            role: "user".into(),
+            content: text.to_string(),
+        }]);
+    }
+    Ok(vec![ChatMessage {
+        role: "user".into(),
+        content: serde_json::to_string(payload)?,
+    }])
+}
+
+fn extract_tool_arguments(payload: &serde_json::Value) -> Result<String> {
+    if let Some(text) = payload.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(map) = payload.as_object() {
+        if let Some(arguments) = map.get("arguments") {
+            if let Some(text) = arguments.as_str() {
+                return Ok(text.to_string());
+            }
+            return Ok(serde_json::to_string(arguments)?);
+        }
+    }
+    Ok(serde_json::to_string(payload)?)
+}
+
+#[cfg(test)]
+mod budget_compaction_tests {
+    use super::{compact_provider_messages_for_budget, estimate_tokens};
+    use crate::providers::ChatMessage;
+
+    #[test]
+    fn provider_budget_compaction_reduces_token_estimate() {
+        let messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: "system guardrails".into(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "long-context ".repeat(900),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "analysis ".repeat(700),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "final instruction keep artifact proof".into(),
+            },
+        ];
+        let before = estimate_tokens(&messages);
+        let compacted = compact_provider_messages_for_budget(&messages, 1_200);
+        let after = estimate_tokens(&compacted);
+        assert!(after < before);
+        assert!(
+            compacted
+                .iter()
+                .any(|message| message.content.contains("final instruction"))
+        );
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,86 +1,109 @@
-use std::{
-    env,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{collections::BTreeSet, fs, path::Path};
 
 fn main() {
-    println!("cargo:rerun-if-changed=spacetimedb/src/lib.rs");
-    println!("cargo:rerun-if-env-changed=SPACETIME_CLI");
-
-    let generated_dir = PathBuf::from("src").join("module_bindings").join("generated");
-    let generated_mod = generated_dir.join("mod.rs");
-    let module_dir = PathBuf::from("spacetimedb");
-
-    if try_generate_bindings(&module_dir, &generated_dir).is_err() && !generated_mod.exists() {
-        fs::create_dir_all(&generated_dir).expect("create generated bindings dir");
-        write_placeholder_bindings(&generated_mod).expect("write placeholder module bindings");
-        println!("cargo:warning=SpacetimeDB CLI generation unavailable; using placeholder generated bindings.");
+    if std::env::var("AUTOLOOP_SKIP_COMPILE_NOBYPASS_SCAN")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+    {
+        println!("cargo:warning=compile no-bypass scan skipped by AUTOLOOP_SKIP_COMPILE_NOBYPASS_SCAN=1");
+        return;
     }
-}
 
-fn try_generate_bindings(_module_dir: &Path, out_dir: &Path) -> std::io::Result<()> {
-    let cli = env::var("SPACETIME_CLI").unwrap_or_else(|_| {
-        let local = PathBuf::from(
-            env::var("LOCALAPPDATA").unwrap_or_else(|_| String::from(r"C:\Users\Default\AppData\Local")),
-        )
-        .join("SpacetimeDB")
-        .join("spacetime.exe");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing");
+    let src_root = Path::new(&manifest_dir).join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
 
-        if local.exists() {
-            local.to_string_lossy().into_owned()
-        } else {
-            "spacetime".to_string()
+    let backend_forbidden = [
+        ".state_store.",
+        ".state_store()",
+        ".providers.",
+        ".providers()",
+        ".tools.",
+        ".tools()",
+    ];
+    let backend_allow_prefixes: BTreeSet<&str> = BTreeSet::from([
+        "src/lib.rs",
+        "src/main.rs",
+        "src/command_dispatch.rs",
+        "src/dashboard_server.rs",
+        "src/agent/mod.rs",
+        "src/cli_runtime/command_registry.rs",
+        "src/orchestration/mod.rs",
+        "src/orchestration/knowledge_context.rs",
+        "src/orchestration/org_context.rs",
+        "src/plugins/lifecycle.rs",
+        "src/runtime/mod.rs",
+        "src/security/capability_admission.rs",
+        "src/services/mediator.rs",
+        "src/services/relation_facade.rs",
+        "src/tools/mod.rs",
+        "src/providers/mod.rs",
+    ]);
+    let mcp_allow_prefixes: BTreeSet<&str> = BTreeSet::from([
+        "src/lib.rs",
+        "src/services/mod.rs",
+        "src/services/mediator.rs",
+        "src/services/mcp_manager.rs",
+    ]);
+
+    let mut violations = Vec::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(&format!("{}/", manifest_dir.replace('\\', "/")))
+            .unwrap_or(&file)
+            .to_string();
+        let Ok(body) = fs::read_to_string(&file) else {
+            continue;
+        };
+
+        if !backend_allow_prefixes.contains(rel.as_str()) {
+            for (idx, line) in body.lines().enumerate() {
+                if backend_forbidden.iter().any(|token| line.contains(token)) {
+                    violations.push(format!(
+                        "{rel}:{}: direct backend access forbidden (`{}`)",
+                        idx + 1,
+                        line.trim()
+                    ));
+                }
+            }
         }
-    });
-    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let wasm_path = PathBuf::from("target")
-        .join("wasm32-unknown-unknown")
-        .join("release")
-        .join("autoloop_spacetimedb_module.wasm");
 
-    let build_status = Command::new(cargo)
-        .args([
-            "build",
-            "--manifest-path",
-            "spacetimedb/Cargo.toml",
-            "--target",
-            "wasm32-unknown-unknown",
-            "--release",
-        ])
-        .status()?;
-
-    if !build_status.success() {
-        return Err(std::io::Error::other("cargo build for spacetimedb module failed"));
+        if !mcp_allow_prefixes.contains(rel.as_str()) {
+            for (idx, line) in body.lines().enumerate() {
+                if line.contains("McpManager")
+                    || line.contains("services::mcp_manager")
+                    || line.contains("::mcp_manager::")
+                {
+                    violations.push(format!(
+                        "{rel}:{}: mcp manager bypass forbidden (`{}`)",
+                        idx + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
     }
 
-    fs::create_dir_all(out_dir)?;
-    let status = Command::new(cli)
-        .args(["generate", "--lang", "rust", "--bin-path"])
-        .arg(wasm_path)
-        .args(["--out-dir"])
-        .arg(out_dir)
-        .args(["--yes"])
-        .status()?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(
-            "spacetime generate exited with a non-zero status",
-        ))
+    if !violations.is_empty() {
+        panic!(
+            "compile-time no-bypass gate failed:\n{}",
+            violations.join("\n")
+        );
     }
 }
 
-fn write_placeholder_bindings(target: &Path) -> std::io::Result<()> {
-    fs::write(
-        target,
-        r#"pub const GENERATED_WITH_SPACETIME_CLI: bool = false;
-
-pub fn generation_hint() -> &'static str {
-    "Install the SpacetimeDB CLI and rebuild to generate strongly typed module bindings."
-}
-"#,
-    )
+fn collect_rs_files(dir: &Path, out: &mut Vec<String>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                if let Some(value) = path.to_str() {
+                    out.push(value.replace('\\', "/"));
+                }
+            }
+        }
+    }
 }

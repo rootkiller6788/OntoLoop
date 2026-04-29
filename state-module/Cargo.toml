@@ -1,0 +1,17 @@
+﻿[package]
+name = "autoloop-state_store-module"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Server-side StateStore module schema for AutoLoop"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+state_store = "2.0.5"
+

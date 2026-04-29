@@ -1,4 +1,4 @@
-# AutoLoop Architecture
+﻿# AutoLoop Architecture
 
 This document is a concise map of the current system using neutral engineering terms.
 
@@ -8,7 +8,7 @@ This document is a concise map of the current system using neutral engineering t
 2. `AutoLoopApp` assembles runtime subsystems (`src/lib.rs`).
 3. Orchestration runs intent clarification -> strategy planning -> swarm execution (`src/orchestration/mod.rs`).
 4. Runtime guard and verifier enforce bounded execution (`src/runtime/mod.rs`).
-5. Knowledge and learning artifacts persist through the SpacetimeDB adapter.
+5. Knowledge and learning artifacts persist through the StateStore adapter.
 
 ## Core Modules
 
@@ -33,8 +33,8 @@ This document is a concise map of the current system using neutral engineering t
 
 ## Data and Storage
 
-- Primary runtime record layer: `autoloop-spacetimedb-adapter/`
-- SpacetimeDB module crate: `spacetimedb/`
+- Primary runtime record layer: `autoloop-state-adapter/`
+- StateStore module crate: `state_store/`
 - Local runtime artifacts: `deploy/runtime/`
 
 ## Frontend Control Surface
@@ -56,3 +56,17 @@ This document is a concise map of the current system using neutral engineering t
 - One-command startup scripts:
   - `deploy/scripts/start-autoloop.ps1`
   - `deploy/scripts/start-autoloop.sh`
+
+## Signal Plane (Whitebox)
+
+- Internal write path is `SignalFacade` -> signal pipeline (no bypass).
+- Pipeline behavior includes redact/filter/sample/rate-limit, dual sink (`evidence` primary + `query-plane explain` secondary), batch/retry/backoff/shutdown flush.
+- CLI whitebox surface:
+  - `system signal status`
+  - `system signal explain`
+  - `system signal drain`
+
+## Reference-Only Components
+
+`rule/` 目录仅用于参考资料管理，不参与编译链接或运行时启动路径。
+

@@ -110,7 +110,10 @@ impl GraphModule {
         );
         let selected_hits = hits.into_iter().take(max_chunks).collect::<Vec<_>>();
 
-        let matched_chunk_ids = selected_hits.iter().map(|hit| hit.chunk_id).collect::<Vec<_>>();
+        let matched_chunk_ids = selected_hits
+            .iter()
+            .map(|hit| hit.chunk_id)
+            .collect::<Vec<_>>();
         let matched_entity_ids = selected_hits
             .iter()
             .flat_map(|hit| hit.entity_ids.iter().copied())
@@ -141,7 +144,12 @@ impl GraphModule {
         }
     }
 
-    pub fn global_query_context(&self, document_id: u64, query: &str, max_communities: usize) -> QueryContext {
+    pub fn global_query_context(
+        &self,
+        document_id: u64,
+        query: &str,
+        max_communities: usize,
+    ) -> QueryContext {
         let terms = tokenize_query(query);
         let mut ranked = self
             .communities()
@@ -205,7 +213,11 @@ impl GraphModule {
         }
     }
 
-    pub fn rank_relationships(&self, document_id: u64, entity_ids: &[u64]) -> Vec<RankedRelationship> {
+    pub fn rank_relationships(
+        &self,
+        document_id: u64,
+        entity_ids: &[u64],
+    ) -> Vec<RankedRelationship> {
         let entity_set = entity_ids.iter().copied().collect::<HashSet<_>>();
         let mut rows = self
             .relationships()
@@ -220,14 +232,24 @@ impl GraphModule {
                 weight: relationship.weight + relationship.confidence,
             })
             .collect::<Vec<_>>();
-        rows.sort_by(|a, b| b.weight.cmp(&a.weight).then_with(|| a.relationship_id.cmp(&b.relationship_id)));
+        rows.sort_by(|a, b| {
+            b.weight
+                .cmp(&a.weight)
+                .then_with(|| a.relationship_id.cmp(&b.relationship_id))
+        });
         rows
     }
 
     fn chunk_entity_map(&self, document_id: u64) -> HashMap<u64, BTreeSet<u64>> {
         let mut map = HashMap::<u64, BTreeSet<u64>>::new();
-        for mention in self.mentions().iter().filter(|mention| mention.document_id == document_id) {
-            map.entry(mention.chunk_id).or_default().insert(mention.entity_id);
+        for mention in self
+            .mentions()
+            .iter()
+            .filter(|mention| mention.document_id == document_id)
+        {
+            map.entry(mention.chunk_id)
+                .or_default()
+                .insert(mention.entity_id);
         }
         map
     }
@@ -302,7 +324,11 @@ pub fn compute_search_hits(
         }
     }
 
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.chunk_id.cmp(&b.chunk_id)));
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+    });
     hits
 }
 
@@ -330,7 +356,10 @@ fn overlap_score(terms: &BTreeSet<String>, haystack: &str) -> u32 {
         .map(normalize_key)
         .filter(|token| token.len() > 1)
         .collect();
-    terms.iter().filter(|term| hay_tokens.contains(*term)).count() as u32
+    terms
+        .iter()
+        .filter(|term| hay_tokens.contains(*term))
+        .count() as u32
 }
 
 fn alias_overlap_score(terms: &BTreeSet<String>, haystack: &str) -> u32 {

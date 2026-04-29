@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     sync::Arc,
@@ -6,9 +6,9 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
-use autoloop_spacetimedb_adapter::{
-    CausalEdgeRecord, KnowledgeRecord, LearningSessionRecord, ReflexionEpisodeRecord, SkillLibraryRecord,
-    WitnessLogRecord,
+use autoloop_state_adapter::{
+    CausalEdgeRecord, KnowledgeRecord, LearningSessionRecord, ReflexionEpisodeRecord,
+    SkillLibraryRecord, WitnessLogRecord,
 };
 use serde::{Deserialize, Serialize};
 
@@ -76,15 +76,33 @@ pub struct JointRoutingEvidence {
 
 #[async_trait]
 pub trait LearningRepository: Send + Sync {
-    async fn upsert_reflexion_episode(&self, record: ReflexionEpisodeRecord) -> Result<ReflexionEpisodeRecord>;
-    async fn list_reflexion_episodes(&self, session_id: &str) -> Result<Vec<ReflexionEpisodeRecord>>;
-    async fn upsert_skill_library_record(&self, record: SkillLibraryRecord) -> Result<SkillLibraryRecord>;
-    async fn list_skill_library_records(&self, session_id: &str) -> Result<Vec<SkillLibraryRecord>>;
-    async fn upsert_causal_edge_record(&self, record: CausalEdgeRecord) -> Result<CausalEdgeRecord>;
+    async fn upsert_reflexion_episode(
+        &self,
+        record: ReflexionEpisodeRecord,
+    ) -> Result<ReflexionEpisodeRecord>;
+    async fn list_reflexion_episodes(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ReflexionEpisodeRecord>>;
+    async fn upsert_skill_library_record(
+        &self,
+        record: SkillLibraryRecord,
+    ) -> Result<SkillLibraryRecord>;
+    async fn list_skill_library_records(&self, session_id: &str)
+    -> Result<Vec<SkillLibraryRecord>>;
+    async fn upsert_causal_edge_record(&self, record: CausalEdgeRecord)
+    -> Result<CausalEdgeRecord>;
     async fn list_causal_edge_records(&self, session_id: &str) -> Result<Vec<CausalEdgeRecord>>;
-    async fn upsert_learning_session_record(&self, record: LearningSessionRecord) -> Result<LearningSessionRecord>;
-    async fn list_learning_session_records(&self, session_id: &str) -> Result<Vec<LearningSessionRecord>>;
-    async fn append_witness_log_record(&self, record: WitnessLogRecord) -> Result<WitnessLogRecord>;
+    async fn upsert_learning_session_record(
+        &self,
+        record: LearningSessionRecord,
+    ) -> Result<LearningSessionRecord>;
+    async fn list_learning_session_records(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<LearningSessionRecord>>;
+    async fn append_witness_log_record(&self, record: WitnessLogRecord)
+    -> Result<WitnessLogRecord>;
     async fn list_witness_log_records(&self, session_id: &str) -> Result<Vec<WitnessLogRecord>>;
 }
 
@@ -273,3 +291,4 @@ pub fn document_from_forged_tool_manifest(
 }
 
 pub type SharedEmbeddingProvider = Arc<dyn EmbeddingProvider>;
+

@@ -1,0 +1,7 @@
+{
+  "id": "d7-validate-skill",
+  "version": "v1",
+  "layer": "s3_prompt_mcp",
+  "created_at_ms": 1775806763038,
+  "enabled": true
+}

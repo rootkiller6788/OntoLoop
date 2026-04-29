@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use hnsw_rs::{
@@ -12,7 +9,9 @@ use parking_lot::RwLock;
 
 use crate::config::{LearningConfig, LearningIndexKind, QuantizationMode};
 
-use super::learning::{LearningDocument, LearningFilter, RetrievalEvidence, SharedEmbeddingProvider};
+use super::learning::{
+    LearningDocument, LearningFilter, RetrievalEvidence, SharedEmbeddingProvider,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageTier {
@@ -185,7 +184,8 @@ impl FlatIndex {
         self.cold_entries.remove(&cold_entry.document.id);
         match tier {
             StorageTier::Hot => {
-                self.hot_entries.insert(hot_entry.document.id.clone(), hot_entry);
+                self.hot_entries
+                    .insert(hot_entry.document.id.clone(), hot_entry);
             }
             StorageTier::Cold => {
                 self.cold_entries
@@ -241,12 +241,18 @@ impl HnswIndex {
         }
     }
 
-    fn upsert(&mut self, hot_entry: SidecarEntry, cold_entry: ColdEntry, tier: StorageTier) -> Result<()> {
+    fn upsert(
+        &mut self,
+        hot_entry: SidecarEntry,
+        cold_entry: ColdEntry,
+        tier: StorageTier,
+    ) -> Result<()> {
         self.hot_entries.remove(&hot_entry.document.id);
         self.cold_entries.remove(&cold_entry.document.id);
         match tier {
             StorageTier::Hot => {
-                self.hot_entries.insert(hot_entry.document.id.clone(), hot_entry);
+                self.hot_entries
+                    .insert(hot_entry.document.id.clone(), hot_entry);
             }
             StorageTier::Cold => {
                 self.cold_entries
@@ -483,7 +489,10 @@ mod tests {
 
     #[tokio::test]
     async fn sidecar_supports_rebuild_and_filtered_search() {
-        let sidecar = SidecarMemoryIndex::new(config(QuantizationMode::Scalar), Arc::new(HashEmbeddingProvider::new(32)));
+        let sidecar = SidecarMemoryIndex::new(
+            config(QuantizationMode::Scalar),
+            Arc::new(HashEmbeddingProvider::new(32)),
+        );
         sidecar
             .upsert(LearningDocument {
                 id: "skill-1".into(),
@@ -518,7 +527,10 @@ mod tests {
 
     #[tokio::test]
     async fn sidecar_uses_cold_quantized_tier() {
-        let sidecar = SidecarMemoryIndex::new(config(QuantizationMode::Binary), Arc::new(HashEmbeddingProvider::new(32)));
+        let sidecar = SidecarMemoryIndex::new(
+            config(QuantizationMode::Binary),
+            Arc::new(HashEmbeddingProvider::new(32)),
+        );
         sidecar
             .upsert(LearningDocument {
                 id: "old-witness".into(),

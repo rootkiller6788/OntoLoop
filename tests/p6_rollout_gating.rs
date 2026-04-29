@@ -6,9 +6,9 @@ use autoloop::{
     },
     providers::ProviderRegistry,
     runtime::RuntimeKernel,
-    spacetimedb_adapter::{
-        PolicyBinding, Principal, RoleBinding, SessionLease, SpacetimeBackend, SpacetimeDb,
-        SpacetimeDbConfig, Tenant,
+    state_store_adapter::{
+        PolicyBinding, Principal, RoleBinding, SessionLease, StateStoreBackend, StateStore,
+        StateStoreConfig, Tenant,
     },
     tools::ToolRegistry,
 };
@@ -32,14 +32,15 @@ fn envelope(session: &str) -> TaskEnvelope {
             sandbox_profile: "standard".into(),
             requires_human_approval: true,
         },
+        trust_plan: None,
     }
 }
 
-async fn db() -> SpacetimeDb {
-    let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+async fn db() -> StateStore {
+    let db = StateStore::from_config(&StateStoreConfig {
         enabled: true,
-        backend: SpacetimeBackend::InMemory,
-        uri: "http://spacetimedb:3000".into(),
+        backend: StateStoreBackend::InMemory,
+        uri: "http://state_store:3000".into(),
         module_name: "autoloop_core".into(),
         namespace: "autoloop".into(),
         pool_size: 4,
@@ -71,7 +72,10 @@ async fn shadow_mode_records_but_does_not_block() {
         )
         .await
         .expect("shadow execution");
-    assert_eq!(result.guard_report.decision, autoloop::runtime::GuardDecision::Allow);
+    assert_eq!(
+        result.guard_report.decision,
+        autoloop::runtime::GuardDecision::Allow
+    );
     assert!(result.guard_report.reason.contains("shadow-observe-only"));
 }
 
@@ -95,7 +99,10 @@ async fn full_mode_enforces_guard() {
         )
         .await
         .expect("full execution");
-    assert_ne!(result.guard_report.decision, autoloop::runtime::GuardDecision::Allow);
+    assert_ne!(
+        result.guard_report.decision,
+        autoloop::runtime::GuardDecision::Allow
+    );
 }
 
 #[tokio::test]
@@ -119,7 +126,10 @@ async fn canary_ratio_controls_enforcement() {
         )
         .await
         .expect("canary 0");
-    assert_eq!(loose.guard_report.decision, autoloop::runtime::GuardDecision::Allow);
+    assert_eq!(
+        loose.guard_report.decision,
+        autoloop::runtime::GuardDecision::Allow
+    );
 
     config.runtime.gate_enforce_ratio = 1.0;
     let runtime_full_like = RuntimeKernel::from_config(&config.runtime);
@@ -135,7 +145,10 @@ async fn canary_ratio_controls_enforcement() {
         )
         .await
         .expect("canary 1");
-    assert_ne!(strict.guard_report.decision, autoloop::runtime::GuardDecision::Allow);
+    assert_ne!(
+        strict.guard_report.decision,
+        autoloop::runtime::GuardDecision::Allow
+    );
 }
 
 fn identity_for(session_id: &str) -> ExecutionIdentity {
@@ -147,7 +160,7 @@ fn identity_for(session_id: &str) -> ExecutionIdentity {
     }
 }
 
-async fn seed_identity(db: &SpacetimeDb, session_id: &str) {
+async fn seed_identity(db: &StateStore, session_id: &str) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
@@ -201,3 +214,7 @@ async fn seed_identity(db: &SpacetimeDb, session_id: &str) {
     .await
     .expect("lease");
 }
+
+
+
+

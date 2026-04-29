@@ -1,10 +1,10 @@
-use async_trait::async_trait;
+﻿use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 use super::{signal::WorkflowSignal, state::WorkflowState};
-use autoloop_spacetimedb_adapter::{LearningEventKind, SpacetimeDb, WitnessLogRecord};
 use crate::observability::event_stream::append_event;
+use autoloop_state_adapter::{LearningEventKind, StateStore, WitnessLogRecord};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransitionRecord {
@@ -51,20 +51,20 @@ impl AuditSink for InMemoryAuditSink {
 }
 
 #[derive(Clone)]
-pub struct SpacetimeAuditSink {
-    db: SpacetimeDb,
+pub struct StateAuditSink {
+    db: StateStore,
     source: String,
 }
 
-impl SpacetimeAuditSink {
-    pub fn new(db: SpacetimeDb) -> Self {
+impl StateAuditSink {
+    pub fn new(db: StateStore) -> Self {
         Self {
             db,
             source: "workflow-machine".into(),
         }
     }
 
-    pub fn with_source(db: SpacetimeDb, source: impl Into<String>) -> Self {
+    pub fn with_source(db: StateStore, source: impl Into<String>) -> Self {
         Self {
             db,
             source: source.into(),
@@ -73,7 +73,7 @@ impl SpacetimeAuditSink {
 }
 
 #[async_trait]
-impl AuditSink for SpacetimeAuditSink {
+impl AuditSink for StateAuditSink {
     async fn record_transition(&self, record: TransitionRecord) -> anyhow::Result<()> {
         static AUDIT_SEQ: AtomicU64 = AtomicU64::new(1);
         let seq = AUDIT_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -112,19 +112,19 @@ impl AuditSink for SpacetimeAuditSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autoloop_spacetimedb_adapter::{SpacetimeBackend, SpacetimeDbConfig};
+    use autoloop_state_adapter::{StateStoreBackend, StateStoreConfig};
 
     #[tokio::test]
-    async fn spacetime_audit_sink_persists_transition_records() {
-        let db = SpacetimeDb::from_config(&SpacetimeDbConfig {
+    async fn state_module_audit_sink_persists_transition_records() {
+        let db = StateStore::from_config(&StateStoreConfig {
             enabled: true,
-            backend: SpacetimeBackend::InMemory,
-            uri: "http://spacetimedb:3000".into(),
+            backend: StateStoreBackend::InMemory,
+            uri: "http://state_store:3000".into(),
             module_name: "autoloop_core".into(),
             namespace: "autoloop".into(),
             pool_size: 4,
         });
-        let sink = SpacetimeAuditSink::new(db.clone());
+        let sink = StateAuditSink::new(db.clone());
         let record = TransitionRecord {
             session_id: "session-audit-db".into(),
             from: WorkflowState::Intake,
@@ -144,3 +144,4 @@ mod tests {
         assert!(records[0].detail.contains("workflow transition"));
     }
 }
+

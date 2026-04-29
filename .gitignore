@@ -1,23 +1,86 @@
-# Rust
-/target
+# ----------------------------
+# Rust / Cargo
+# ----------------------------
+/target/
+**/target/
 **/*.rs.bk
+*.pdb
+.cargo/
 
-# Frontend
-/dashboard-ui/node_modules
-/dashboard-ui/dist
-/dashboard-ui/.vite
+# ----------------------------
+# Frontend (Vite / Node)
+# ----------------------------
+**/node_modules/
+**/dist/
+**/.vite/
+**/.cache/
+**/.npm/
+**/.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Runtime artifacts and logs
-/deploy/runtime
+# ----------------------------
+# Generated code
+# ----------------------------
+src/module_bindings/generated/
+
+# ----------------------------
+# Runtime artifacts / logs
+# ----------------------------
+/deploy/runtime/**
+!/deploy/runtime/.gitkeep
 *.log
+*.log.*
+*.tmp
+*.temp
+tmp_*.json
+route_decision.json
+validation_report.json
+Gemini_Generated_Image_*.png
 
+# ----------------------------
+# Python local runtime
+# ----------------------------
+**/.venv/
+**/venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+
+# ----------------------------
+# OntoLoop local state
+# ----------------------------
+**/.gitmemory/
+**/.autocog/
+
+# ----------------------------
 # Local secrets / env
+# ----------------------------
 .env
 .env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
 
+# ----------------------------
+# Testing / coverage
+# ----------------------------
+coverage/
+*.lcov
+.nyc_output/
+
+# ----------------------------
 # OS / editor noise
+# ----------------------------
 .DS_Store
 Thumbs.db
+Desktop.ini
+nul
 .idea/
 .vscode/
-
+claude code/
