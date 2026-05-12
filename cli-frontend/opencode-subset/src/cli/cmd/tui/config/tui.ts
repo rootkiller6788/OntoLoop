@@ -1,4 +1,4 @@
-export * as TuiConfig from "./tui"
+﻿export * as TuiConfig from "./tui"
 
 import z from "zod"
 import { mergeDeep, unique } from "remeda"
@@ -43,7 +43,7 @@ export interface Interface {
   readonly waitForDependencies: () => Effect.Effect<void>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/TuiConfig") {}
+export class Service extends Context.Service<Service, Interface>()("@OntoLoop/TuiConfig") {}
 
 function pluginScope(file: string, ctx: { directory: string }): ConfigPlugin.Scope {
   if (Filesystem.contains(ctx.directory, file)) return "local"
@@ -90,8 +90,8 @@ async function mergeFile(acc: Acc, file: string, ctx: { directory: string }) {
 }
 
 const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: string }) {
-  // Every config dir we may read from: global config dir, any `.opencode`
-  // folders between cwd and home, and OPENCODE_CONFIG_DIR.
+  // Every config dir we may read from: global config dir, any `.OntoLoop`
+  // folders between cwd and home, and OntoLoop_CONFIG_DIR.
   const directories = yield* ConfigPaths.directories(ctx.directory)
   yield* Effect.promise(() => migrateTuiConfig({ directories, cwd: ctx.directory }))
 
@@ -106,7 +106,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
     yield* Effect.promise(() => mergeFile(acc, file, ctx)).pipe(Effect.orDie)
   }
 
-  // 2. Explicit OPENCODE_TUI_CONFIG override, if set.
+  // 2. Explicit OntoLoop_TUI_CONFIG override, if set.
   if (Flag.OPENCODE_TUI_CONFIG) {
     const configFile = Flag.OPENCODE_TUI_CONFIG
     yield* Effect.promise(() => mergeFile(acc, configFile, ctx)).pipe(Effect.orDie)
@@ -118,13 +118,13 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
     yield* Effect.promise(() => mergeFile(acc, file, ctx)).pipe(Effect.orDie)
   }
 
-  // 4. `.opencode` directories (and OPENCODE_CONFIG_DIR) discovered while
+  // 4. `.OntoLoop` directories (and OntoLoop_CONFIG_DIR) discovered while
   // walking up the tree. Also returned below so callers can install plugin
   // dependencies from each location.
-  const dirs = unique(directories).filter((dir) => dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR)
+  const dirs = unique(directories).filter((dir) => dir.endsWith(".OntoLoop") || dir === Flag.OPENCODE_CONFIG_DIR)
 
   for (const dir of dirs) {
-    if (!dir.endsWith(".opencode") && dir !== Flag.OPENCODE_CONFIG_DIR) continue
+    if (!dir.endsWith(".OntoLoop") && dir !== Flag.OPENCODE_CONFIG_DIR) continue
     for (const file of ConfigPaths.fileInDirectory(dir, "tui")) {
       yield* Effect.promise(() => mergeFile(acc, file, ctx)).pipe(Effect.orDie)
     }
@@ -208,7 +208,7 @@ async function load(text: string, configFilepath: string): Promise<Info> {
       if (!isRecord(data)) return {}
 
       // Flatten a nested "tui" key so users who wrote `{ "tui": { ... } }` inside tui.json
-      // (mirroring the old opencode.json shape) still get their settings applied.
+      // (mirroring the old OntoLoop.json shape) still get their settings applied.
       return ConfigParse.schema(Info, normalize(data), configFilepath)
     })
     .then((data) => resolvePlugins(data, configFilepath))

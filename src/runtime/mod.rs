@@ -3108,12 +3108,12 @@ impl RuntimeKernel {
             {
                 messages
             } else if let Some(text) = envelope.payload.as_str() {
-                vec![ChatMessage {
+                vec![ChatMessage { tool_call_id: None, tool_calls: None,
                     role: "user".into(),
                     content: text.to_string(),
                 }]
             } else {
-                vec![ChatMessage {
+                vec![ChatMessage { tool_call_id: None, tool_calls: None,
                     role: "user".into(),
                     content: envelope.payload.to_string(),
                 }]
@@ -3289,7 +3289,8 @@ impl RuntimeKernel {
         let window_remaining = window
             .window_budget_micros
             .saturating_sub(window.consumed_micros);
-        if estimated > account_remaining || estimated > window_remaining {
+        let gate_allows_bypass = matches!(self.gate_mode, RuntimeGateMode::Shadow);
+        if !gate_allows_bypass && (estimated > account_remaining || estimated > window_remaining) {
             account.blocked_count = account.blocked_count.saturating_add(1);
             account.updated_at_ms = now;
             window.blocked_count = window.blocked_count.saturating_add(1);
@@ -4227,7 +4228,7 @@ fn compact_provider_messages_for_budget(
     let mut compacted = Vec::new();
     if let Some(system) = messages.iter().find(|message| message.role == "system") {
         let clipped = truncate_chars(&system.content, max_chars / 4);
-        compacted.push(ChatMessage {
+        compacted.push(ChatMessage { tool_call_id: None, tool_calls: None,
             role: system.role.clone(),
             content: clipped,
         });
@@ -4257,7 +4258,7 @@ fn compact_provider_messages_for_budget(
             })
             .collect::<Vec<_>>()
             .join(" | ");
-        compacted.push(ChatMessage {
+        compacted.push(ChatMessage { tool_call_id: None, tool_calls: None,
             role: "assistant".to_string(),
             content: format!(
                 "[BudgetCompactionSummary] preserved most recent messages; prior context summary: {}",
@@ -4273,7 +4274,7 @@ fn compact_provider_messages_for_budget(
 
     let mut hard_compacted = Vec::<ChatMessage>::new();
     if let Some(system) = messages.iter().find(|message| message.role == "system") {
-        hard_compacted.push(ChatMessage {
+        hard_compacted.push(ChatMessage { tool_call_id: None, tool_calls: None,
             role: "system".to_string(),
             content: truncate_chars(
                 &system.content,
@@ -4286,11 +4287,11 @@ fn compact_provider_messages_for_budget(
         .rev()
         .find(|message| message.role == "user")
         .cloned()
-        .unwrap_or_else(|| ChatMessage {
+        .unwrap_or_else(|| ChatMessage { tool_call_id: None, tool_calls: None,
             role: "user".to_string(),
             content: "budget compaction fallback request".to_string(),
         });
-    hard_compacted.push(ChatMessage {
+    hard_compacted.push(ChatMessage { tool_call_id: None, tool_calls: None,
         role: "user".to_string(),
         content: truncate_chars(
             &latest_user.content,
@@ -4302,7 +4303,7 @@ fn compact_provider_messages_for_budget(
         return hard_compacted;
     }
 
-    vec![ChatMessage {
+    vec![ChatMessage { tool_call_id: None, tool_calls: None,
         role: "user".to_string(),
         content: truncate_chars(
             &latest_user.content,
@@ -4870,11 +4871,11 @@ mod tests {
             pool_size: 4,
         });
         let messages = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: "system".into(),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: "this payload should exceed a tiny token budget".into(),
             },
@@ -5167,7 +5168,7 @@ mod tests {
                 policy_id: "policy:p10d".into(),
                 lease_token: "lease:p10d".into(),
             },
-            payload: serde_json::to_value(vec![ChatMessage {
+            payload: serde_json::to_value(vec![ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: "hello drift".into(),
             }])
@@ -5261,7 +5262,7 @@ mod tests {
             task_id: TaskId::from("task-p11-provider"),
             capability_id: CapabilityId::from("provider:default"),
             identity,
-            payload: serde_json::to_value(vec![ChatMessage {
+            payload: serde_json::to_value(vec![ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: "provider outage scenario".into(),
             }])
@@ -5549,7 +5550,7 @@ fn parse_hook_prompt_messages(arguments: &str, fallback: Vec<ChatMessage>) -> Ve
             }
         }
         if let Some(text) = value.as_str() {
-            return vec![ChatMessage {
+            return vec![ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: text.to_string(),
             }];
@@ -5557,7 +5558,7 @@ fn parse_hook_prompt_messages(arguments: &str, fallback: Vec<ChatMessage>) -> Ve
     }
 
     if arguments.len() < 4096 {
-        return vec![ChatMessage {
+        return vec![ChatMessage { tool_call_id: None, tool_calls: None,
             role: "user".into(),
             content: arguments.to_string(),
         }];
@@ -5606,12 +5607,12 @@ fn extract_provider_messages(payload: &serde_json::Value) -> Result<Vec<ChatMess
         return Ok(messages);
     }
     if let Some(text) = payload.as_str() {
-        return Ok(vec![ChatMessage {
+        return Ok(vec![ChatMessage { tool_call_id: None, tool_calls: None,
             role: "user".into(),
             content: text.to_string(),
         }]);
     }
-    Ok(vec![ChatMessage {
+    Ok(vec![ChatMessage { tool_call_id: None, tool_calls: None,
         role: "user".into(),
         content: serde_json::to_string(payload)?,
     }])
@@ -5640,19 +5641,19 @@ mod budget_compaction_tests {
     #[test]
     fn provider_budget_compaction_reduces_token_estimate() {
         let messages = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: "system guardrails".into(),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: "long-context ".repeat(900),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "assistant".into(),
                 content: "analysis ".repeat(700),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: "final instruction keep artifact proof".into(),
             },

@@ -684,9 +684,21 @@ CREATE INDEX IF NOT EXISTS idx_relation_hot_index_evidence_ref ON {schema}.relat
             .unwrap_or(0)
     }
 
+    fn now_ns() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+
     fn next_evidence_ref(scope: &str) -> String {
         let seq = EVIDENCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("evidence:{scope}:{}:{seq}", Self::now_ms())
+        format!(
+            "evidence:{scope}:{}:{}:{seq}:{}",
+            Self::now_ms(),
+            Self::now_ns(),
+            std::process::id()
+        )
     }
 
     async fn upsert_kv_tx(

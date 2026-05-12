@@ -18,6 +18,7 @@ mcp_breaker_failure_threshold = 2
 mcp_breaker_cooldown_ms = 300000
 gate_mode = "shadow"
 gate_enforce_ratio = 0.2
+wasm_module_root = "rule/wasm-modules"
 rollback_contract_version = "v1"
 attestation_required = false
 attestation_backend = "env"

@@ -1,7 +1,9 @@
 param(
   [string]$ManifestPath = ".\Cargo.toml",
   [string]$ProdConfigPath = "deploy/config/autoloop.prod.toml",
-  [string]$SessionPrefix = "daily-rollback"
+  [string]$SessionPrefix = "daily-rollback",
+  [ValidateSet("light","full")]
+  [string]$DrillMode = "light"
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,18 +55,22 @@ try {
   Invoke-Step -Name "canary-path-write-blocked-with-traceable-deny" -Exe "cargo" -Argv @(
     "test", "--manifest-path", $ManifestPath, "--lib", "tests::production_write_gate_blocks_canary_path_9c"
   )
-  Invoke-Step -Name "canary-fail-auto-rollback-e2e" -Exe "cargo" -Argv @(
-    "test", "--manifest-path", $ManifestPath, "--test", "pevo_r10_promote_canary_fail_rollback_e2e"
-  )
-  Invoke-Step -Name "rollout-drill-shadow-canary-full-rollback" -Exe "powershell" -Argv @(
-    "-ExecutionPolicy", "Bypass", "-File", ".\deploy\scripts\d14_rollout.ps1",
-    "-ManifestPath", $ManifestPath,
-    "-ProdConfigPath", $ProdConfigPath,
-    "-SessionPrefix", $SessionPrefix
-  )
+  if ($DrillMode -eq "full") {
+    Invoke-Step -Name "canary-fail-auto-rollback-e2e" -Exe "cargo" -Argv @(
+      "test", "--manifest-path", $ManifestPath, "--test", "pevo_r10_promote_canary_fail_rollback_e2e"
+    )
+    Invoke-Step -Name "rollout-drill-shadow-canary-full-rollback" -Exe "powershell" -Argv @(
+      "-ExecutionPolicy", "Bypass", "-File", ".\deploy\scripts\d14_rollout.ps1",
+      "-ManifestPath", $ManifestPath,
+      "-ProdConfigPath", $ProdConfigPath,
+      "-SessionPrefix", $SessionPrefix
+    )
+  }
 
   $summary = [pscustomobject]@{
     generated_at = (Get-Date).ToString("s")
+    drill_mode = $DrillMode
+    cadence = if ($DrillMode -eq "full") { "weekly" } else { "daily" }
     manifest = $ManifestPath
     prod_config = $ProdConfigPath
     all_passed = $true

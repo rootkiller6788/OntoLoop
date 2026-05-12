@@ -1,4 +1,4 @@
-import { createMemo, createSignal } from "solid-js"
+﻿import { createMemo, createSignal } from "solid-js"
 import { useLocal } from "@tui/context/local"
 import { useSync } from "@tui/context/sync"
 import { map, pipe, flatMap, entries, filter, sortBy, take } from "remeda"
@@ -12,7 +12,7 @@ import * as fuzzysort from "fuzzysort"
 export function useConnected() {
   const sync = useSync()
   return createMemo(() =>
-    sync.data.provider.some((x) => x.id !== "opencode" || Object.values(x.models).some((y) => y.cost?.input !== 0)),
+    sync.data.provider.some((x) => x.id !== "OntoLoop" || Object.values(x.models).some((y) => y.cost?.input !== 0)),
   )
 }
 
@@ -48,8 +48,8 @@ export function DialogModel(props: { providerID?: string }) {
             title: model.name ?? item.modelID,
             description: provider.name,
             category,
-            disabled: provider.id === "opencode" && model.id.includes("-nano"),
-            footer: model.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            disabled: provider.id === "OntoLoop" && model.id.includes("-nano"),
+            footer: model.cost?.input === 0 && provider.id === "OntoLoop" ? "Free" : undefined,
             onSelect: () => {
               onSelect(provider.id, model.id)
             },
@@ -69,7 +69,7 @@ export function DialogModel(props: { providerID?: string }) {
     const providerOptions = pipe(
       sync.data.provider,
       sortBy(
-        (provider) => provider.id !== "opencode",
+        (provider) => provider.id !== "OntoLoop",
         (provider) => provider.name,
       ),
       flatMap((provider) =>
@@ -85,8 +85,8 @@ export function DialogModel(props: { providerID?: string }) {
               ? "(Favorite)"
               : undefined,
             category: connected() ? provider.name : undefined,
-            disabled: provider.id === "opencode" && model.includes("-nano"),
-            footer: info.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            disabled: provider.id === "OntoLoop" && model.includes("-nano"),
+            footer: info.cost?.input === 0 && provider.id === "OntoLoop" ? "Free" : undefined,
             onSelect() {
               onSelect(provider.id, model)
             },

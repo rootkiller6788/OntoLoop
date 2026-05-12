@@ -1,4 +1,4 @@
-use anyhow::Result;
+﻿use anyhow::Result;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -44,7 +44,7 @@ impl Session {
     }
 
     pub fn push(&mut self, role: impl Into<String>, content: impl Into<String>) {
-        self.history.push(ChatMessage {
+        self.history.push(ChatMessage { tool_call_id: None, tool_calls: None,
             role: role.into(),
             content: content.into(),
         });
@@ -324,14 +324,39 @@ impl SessionStore {
     }
 
     async fn append_message(&self, session_id: &str, role: &str, content: &str) {
-        let (snapshot, message_index) = {
+        let session = {
             let mut sessions = self.inner.write().await;
             let session = sessions
                 .entry(session_id.to_string())
-                .or_insert_with(|| Session::new(session_id));
+                .or_insert_with(|| {
+                    let mut s = Session::new(session_id);
+                    // try loading saved session from file for cross-process resume
+                    let path = std::path::PathBuf::from(".ontoloop-sessions")
+                        .join(format!("{session_id}.json"));
+                    if let Ok(data) = std::fs::read_to_string(&path) {
+                        if let Ok(history) = serde_json::from_str::<Vec<ChatMessage>>(&data) {
+                            s.history = history;
+                        }
+                    }
+                    s
+                });
             session.push(role, content);
-            (session.clone(), session.history.len().saturating_sub(1))
+            session.clone()
         };
+        let message_index = session.history.len().saturating_sub(1);
+
+        // persist session history to file for cross-process resume
+        // only save user and assistant text messages (skip tool messages)
+        let clean_history: Vec<&ChatMessage> = session.history.iter()
+            .filter(|m| m.role == "user" || (m.role == "assistant" && m.tool_calls.is_none()))
+            .collect();
+        if !clean_history.is_empty() {
+            if let Ok(json) = serde_json::to_string(&clean_history) {
+                let dir = std::path::PathBuf::from(".ontoloop-sessions");
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::fs::write(dir.join(format!("{session_id}.json")), json);
+            }
+        }
 
         let identity = self.identities.read().await.get(session_id).cloned();
         let item = build_context_item(session_id, role, content, message_index, identity.as_ref());
@@ -352,7 +377,7 @@ impl SessionStore {
 
         if let Ok(checkpoint) = self
             .runtime
-            .checkpoint_session(&snapshot, &checkpoint_items)
+            .checkpoint_session(&session, &checkpoint_items)
         {
             let bundle = ContextCacheOrchestrator::from_checkpoint(&checkpoint);
             self.context_cache

@@ -8,6 +8,11 @@ param(
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Push-Location $repoRoot
+$previousAutoLoopProfile = if (Test-Path Env:AUTOLOOP_PROFILE) { $env:AUTOLOOP_PROFILE } else { $null }
+$previousCargoTargetDir = if (Test-Path Env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { $null }
+$env:AUTOLOOP_PROFILE = "production-e2e"
+$scriptSucceeded = $false
+$targetDir = $null
 
 $backupPath = ""
 $summaryPath = ""
@@ -27,6 +32,9 @@ try {
   $logPath = Join-Path $runtimeDir ("d14-rollout-" + $stamp + ".log")
   $summaryPath = Join-Path $runtimeDir ("d14-rollout-" + $stamp + ".json")
   $backupPath = Join-Path $runtimeDir ("d14-rollout-config-backup-" + $stamp + ".toml")
+  $targetDir = Join-Path $runtimeDir ("target-d14-" + $stamp)
+  New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+  $env:CARGO_TARGET_DIR = $targetDir
 
   Copy-Item -Path $ProdConfigPath -Destination $backupPath -Force
 
@@ -110,12 +118,14 @@ try {
         }
         "storage" {
           if ($trimmed -match '^backend\s*=') {
-            $lines[$i] = 'backend = "primary_store"'
+            $lines[$i] = 'backend = "postgres"'
+          } elseif ($trimmed -match '^shadow_read_preference\s*=') {
+            $lines[$i] = 'shadow_read_preference = "postgres"'
           }
         }
         "storage.postgres" {
           if ($trimmed -match '^enabled\s*=') {
-            $lines[$i] = 'enabled = false'
+            $lines[$i] = 'enabled = true'
           } elseif ($trimmed -match '^uri\s*=') {
             $lines[$i] = 'uri = "postgres://postgres:123456@localhost:5432/ontoloop"'
           }
@@ -123,6 +133,45 @@ try {
       }
     }
     Set-Content -Path $ProdConfigPath -Value $lines -Encoding utf8
+  }
+
+  function Invoke-ConfigDoctorGate {
+    param(
+      [string]$SessionId,
+      [string]$Profile = "production-e2e"
+    )
+    $out = Join-Path $runtimeDir ("d14-config-doctor-" + $stamp + ".json")
+    Invoke-Step -Name "pre-rollout-config-doctor-gate" -Exe "cargo" -Argv @(
+      "run", "--manifest-path", $ManifestPath, "--",
+      "--config", $ProdConfigPath,
+      "--session", $SessionId,
+      "system", "config", "doctor",
+      "--profile", $Profile,
+      "--output", $out
+    ) | Out-Null
+    if (-not (Test-Path $out)) {
+      throw "config doctor output missing: $out"
+    }
+    $doctor = Get-Content -Raw -Path $out | ConvertFrom-Json
+    if ($doctor.status -ne "pass") {
+      throw "config doctor hard gate failed: status=$($doctor.status)"
+    }
+    $requiredIds = @(
+      "profile.alignment",
+      "runtime.gate_mode",
+      "runtime.rollback_window",
+      "storage.postgres.enabled_uri",
+      "storage.backend_consistency"
+    )
+    foreach ($id in $requiredIds) {
+      $check = $doctor.checks | Where-Object { $_.id -eq $id } | Select-Object -First 1
+      if ($null -eq $check) {
+        throw "config doctor hard gate missing required check: $id"
+      }
+      if (-not $check.passed) {
+        throw "config doctor hard gate check failed: $id => $($check.message)"
+      }
+    }
   }
 
   function Invoke-Rollback {
@@ -158,6 +207,7 @@ try {
   Invoke-Step -Name "cargo-check" -Exe "cargo" -Argv @("check", "--workspace", "--manifest-path", $ManifestPath)
   Invoke-Step -Name "rollout-gating-test" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "p6_rollout_gating")
   Normalize-ConfigForLocalRollout
+  Invoke-ConfigDoctorGate -SessionId ($SessionPrefix + "-config-doctor") -Profile "production-e2e"
 
   $stages = @(
     [pscustomobject]@{ name = "shadow"; mode = "shadow"; ratio = 0.2; session = $SessionPrefix + "-shadow" },
@@ -178,6 +228,7 @@ try {
   }
 
   Invoke-Rollback -Reason "post_full_drill"
+  $scriptSucceeded = $true
 }
 catch {
   $allPassed = $false
@@ -187,6 +238,16 @@ catch {
   Invoke-Rollback -Reason "auto_rollback_on_failure"
 }
 finally {
+  if ($null -eq $previousAutoLoopProfile) {
+    Remove-Item Env:AUTOLOOP_PROFILE -ErrorAction SilentlyContinue
+  } else {
+    $env:AUTOLOOP_PROFILE = $previousAutoLoopProfile
+  }
+  if ($null -eq $previousCargoTargetDir) {
+    Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  } else {
+    $env:CARGO_TARGET_DIR = $previousCargoTargetDir
+  }
   $summary = [pscustomobject]@{
     generated_at = (Get-Date).ToString("s")
     repo_root = $repoRoot
@@ -215,6 +276,25 @@ finally {
 
   if ($backupPath -and (Test-Path $backupPath)) {
     Copy-Item -Path $backupPath -Destination $ProdConfigPath -Force
+  }
+  if ($scriptSucceeded) {
+    if ($null -ne $targetDir -and (Test-Path $targetDir)) {
+      Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  } else {
+    $cutoff = (Get-Date).AddDays(-7)
+    $targets = Get-ChildItem -Path (Join-Path $repoRoot "deploy\runtime") -Directory -Filter "target-d14-*" -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending
+    $keepOne = $targets | Select-Object -First 1
+    foreach ($d in $targets) {
+      if ($null -ne $keepOne -and $d.FullName -eq $keepOne.FullName) {
+        if ($d.LastWriteTime -lt $cutoff) {
+          Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        continue
+      }
+      Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
   Pop-Location
 }

@@ -32,6 +32,10 @@ pub struct LlmResponse {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -876,12 +880,18 @@ struct OpenAiChatRequest {
     model: String,
     messages: Vec<OpenAiChatMessage>,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiChatMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -913,14 +923,16 @@ struct OpenAiAssistantMessage {
     tool_calls: Vec<OpenAiToolCall>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiToolCall {
+    #[serde(default)]
+    r#type: String,
     id: String,
     #[serde(default)]
     function: Option<OpenAiFunctionCall>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenAiFunctionCall {
     name: String,
     arguments: String,
@@ -1129,6 +1141,7 @@ pub struct OpenAiCompatibleProvider {
     name: String,
     client: reqwest::Client,
     base_url: String,
+    tools: Option<serde_json::Value>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -1152,6 +1165,11 @@ impl OpenAiCompatibleProvider {
             name: "openai-compatible".into(),
             client,
             base_url: config.api_base_url.trim_end_matches('/').into(),
+            tools: Some(serde_json::json!([
+                {"type": "function", "function": {"name": "read_file", "description": "Read a file from the filesystem", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Path to the file"}}, "required": ["path"]}}},
+                {"type": "function", "function": {"name": "write_file", "description": "Write content to a file", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "File path"}, "content": {"type": "string", "description": "Content to write"}}, "required": ["path", "content"]}}},
+                {"type": "function", "function": {"name": "shell", "description": "Execute a shell command. Use for: cargo build, cargo test, git, ls, cat", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "Shell command"}}, "required": ["command"]}}}
+            ])),
         })
     }
 }
@@ -1178,9 +1196,16 @@ impl Provider for OpenAiCompatibleProvider {
                 .map(|message| OpenAiChatMessage {
                     role: message.role.clone(),
                     content: message.content.clone(),
+                    tool_call_id: message.tool_call_id.clone(),
+                    tool_calls: message.tool_calls.as_ref().map(|tc| tc.iter().map(|c| OpenAiToolCall {
+                        r#type: "function".to_string(),
+                        id: c.id.clone(),
+                        function: Some(OpenAiFunctionCall { name: c.name.clone(), arguments: c.arguments.clone() }),
+                    }).collect()),
                 })
                 .collect(),
             temperature: 0.2,
+            tools: self.tools.clone(),
         };
 
         let mut attempts: u32 = 0;
@@ -1219,6 +1244,7 @@ impl Provider for OpenAiCompatibleProvider {
                     .text()
                     .await
                     .unwrap_or_else(|_| "<body unavailable>".to_string());
+                let body_snippet: String = body.chars().take(500).collect();
                 let taxonomy = classify_http_error(status, Some(body));
                 let retryable = taxonomy.retryable && attempts < max_attempts;
                 last_error = Some(taxonomy.clone());
@@ -1227,9 +1253,10 @@ impl Provider for OpenAiCompatibleProvider {
                     continue;
                 }
                 return Err(anyhow::anyhow!(
-                    "provider returned non-success status {} [{}]",
+                    "provider returned non-success status {} [{}] | body: {}",
                     status,
-                    render_error_category(&taxonomy.category)
+                    render_error_category(&taxonomy.category),
+                    body_snippet
                 ));
             }
 
@@ -1655,10 +1682,14 @@ impl ProviderRegistry {
         let prompt = vec![
             ChatMessage {
                 role: "system".into(),
+                tool_call_id: None,
+                tool_calls: None,
                 content: "You are the strategy layer for autonomous optimization. Propose the next iteration, focusing on the highest-leverage bounded change, expected gain, risk, and evaluation focus.".into(),
             },
             ChatMessage {
                 role: "user".into(),
+                tool_call_id: None,
+                tool_calls: None,
                 content: format!(
                     "Objective: {objective}\nHistory: {history_summary}\nSignals: {signal_text}"
                 ),
@@ -1876,6 +1907,8 @@ fn normalize_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         normalized.push(ChatMessage {
             role: message.role.clone(),
             content: compress_text(&normalized_content, 1800),
+            tool_call_id: message.tool_call_id.clone(),
+            tool_calls: message.tool_calls.clone(),
         });
     }
     normalized

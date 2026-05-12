@@ -5,6 +5,7 @@ MANIFEST_PATH="${1:-./Cargo.toml}"
 PROD_CONFIG_PATH="${2:-deploy/config/autoloop.prod.toml}"
 SESSION_PREFIX="${3:-d14-rollout}"
 DRY_RUN="${4:-false}"
+PROFILE="${AUTOLOOP_PROFILE:-production-e2e}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -31,6 +32,7 @@ restore_config() {
   fi
 }
 trap restore_config EXIT
+export AUTOLOOP_PROFILE="${PROFILE}"
 
 run_step() {
   local name="$1"
@@ -82,11 +84,15 @@ normalize_config_for_local_rollout() {
       next
     }
     section == "[storage]" && $0 ~ /^[[:space:]]*backend[[:space:]]*=/ {
-      print "backend = \"primary_store\""
+      print "backend = \"postgres\""
+      next
+    }
+    section == "[storage]" && $0 ~ /^[[:space:]]*shadow_read_preference[[:space:]]*=/ {
+      print "shadow_read_preference = \"postgres\""
       next
     }
     section == "[storage.postgres]" && $0 ~ /^[[:space:]]*enabled[[:space:]]*=/ {
-      print "enabled = false"
+      print "enabled = true"
       next
     }
     section == "[storage.postgres]" && $0 ~ /^[[:space:]]*uri[[:space:]]*=/ {
@@ -98,6 +104,29 @@ normalize_config_for_local_rollout() {
     }
   ' "$file" > "${file}.tmp"
   mv "${file}.tmp" "$file"
+}
+
+run_config_doctor_gate() {
+  local session_id="$1"
+  local profile="$2"
+  local out="${RUNTIME_DIR}/d14-config-doctor-${STAMP}.json"
+  run_step "pre-rollout-config-doctor-gate" cargo run --manifest-path "${MANIFEST_PATH}" -- --config "${PROD_CONFIG_PATH}" --session "${session_id}" system config doctor --profile "${profile}" --output "${out}"
+  if [[ ! -f "${out}" ]]; then
+    echo "config doctor output missing: ${out}" >> "${LOG_PATH}"
+    return 1
+  fi
+  local out_win
+  out_win="$(cygpath -w "${out}")"
+  powershell -NoProfile -Command "\
+  \$doctor = Get-Content -Raw -Path '${out_win}' | ConvertFrom-Json; \
+  if ([string]\$doctor.status -ne 'pass') { throw 'config doctor hard gate failed: status=' + [string]\$doctor.status }; \
+  \$requiredIds = @('profile.alignment','runtime.gate_mode','runtime.rollback_window','storage.postgres.enabled_uri','storage.backend_consistency'); \
+  foreach (\$id in \$requiredIds) { \
+    \$check = \$doctor.checks | Where-Object { \$_.id -eq \$id } | Select-Object -First 1; \
+    if (\$null -eq \$check) { throw 'config doctor hard gate missing required check: ' + \$id }; \
+    if (-not \$check.passed) { throw 'config doctor hard gate check failed: ' + \$id + ' => ' + [string]\$check.message }; \
+  }\
+  "
 }
 
 run_rollback() {
@@ -128,6 +157,13 @@ fi
 
 if [[ "${ALL_PASSED}" == "true" ]]; then
   normalize_config_for_local_rollout
+fi
+
+if [[ "${ALL_PASSED}" == "true" ]]; then
+  if ! run_config_doctor_gate "${SESSION_PREFIX}-config-doctor" "${PROFILE}"; then
+    ALL_PASSED=false
+    FAILURE="pre-rollout-config-doctor-gate failed"
+  fi
 fi
 
 if [[ "${ALL_PASSED}" == "true" ]]; then

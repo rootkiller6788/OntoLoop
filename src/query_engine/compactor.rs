@@ -141,7 +141,7 @@ impl ContextCompactor {
         };
 
         let mut compacted_messages = Vec::new();
-        compacted_messages.push(ChatMessage {
+        compacted_messages.push(ChatMessage { tool_call_id: None, tool_calls: None,
             role: "system".into(),
             content: format!(
                 "[CompactionBoundary:{}|{}]\n{}\n[Continuation] Resume from preserved recent messages.",
@@ -258,7 +258,7 @@ mod tests {
 
     fn messages(count: usize, words: usize) -> Vec<ChatMessage> {
         (0..count)
-            .map(|idx| ChatMessage {
+            .map(|idx| ChatMessage { tool_call_id: None, tool_calls: None,
                 role: if idx % 2 == 0 { "user".into() } else { "assistant".into() },
                 content: (0..words)
                     .map(|w| format!("m{idx}_w{w}"))

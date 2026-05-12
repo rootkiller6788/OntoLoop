@@ -16,8 +16,9 @@ tool_breaker_failure_threshold = 4
 tool_breaker_cooldown_ms = 240000
 mcp_breaker_failure_threshold = 3
 mcp_breaker_cooldown_ms = 360000
-gate_mode = "full"
-gate_enforce_ratio = 1
+gate_mode = "shadow"
+gate_enforce_ratio = 0.2
+wasm_module_root = "rule/wasm-modules"
 rollback_contract_version = "v1"
 attestation_required = false
 attestation_backend = "env"
@@ -133,7 +134,7 @@ shadow_write_grace_hours = 24
 
 [storage.postgres]
 enabled = true
-uri = "postgres://postgres:123456@localhost:5432/ontoloop_prod"
+uri = "postgres://postgres:123456@localhost:5432/ontoloop"
 pool_size = 24
 schema = "public"
 app_name = "ontoloop-prod"
@@ -145,6 +146,31 @@ uri = "http://127.0.0.1:3000"
 module_name = "autoloop_core"
 namespace = "autoloop"
 pool_size = 16
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

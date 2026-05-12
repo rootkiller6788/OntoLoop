@@ -1,4 +1,4 @@
-import path from "path"
+﻿import path from "path"
 import { Global } from "@/global"
 import { Filesystem } from "@/util"
 import { onMount } from "solid-js"

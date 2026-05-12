@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+﻿use anyhow::{Result, bail};
 
 use crate::providers::ChatMessage;
 
@@ -282,11 +282,11 @@ mod tests {
 
     fn seed_messages() -> Vec<ChatMessage> {
         vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: "policy anchor".into(),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: "build a governance-safe plan".into(),
             },

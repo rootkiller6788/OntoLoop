@@ -1,4 +1,4 @@
-use anyhow::Result;
+﻿use anyhow::Result;
 
 use crate::contracts::context::ContextItem;
 
@@ -177,11 +177,11 @@ mod tests {
         let checkpoint = SessionCheckpoint {
             session_id: "cache-test".to_string(),
             history: vec![
-                ChatMessage {
+                ChatMessage { tool_call_id: None, tool_calls: None,
                     role: "user".to_string(),
                     content: "Need summary".to_string(),
                 },
-                ChatMessage {
+                ChatMessage { tool_call_id: None, tool_calls: None,
                     role: "assistant".to_string(),
                     content: "Here is summary".to_string(),
                 },

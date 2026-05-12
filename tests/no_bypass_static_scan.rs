@@ -62,12 +62,21 @@ fn direct_backend_access_only_in_boundary_modules() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src_root = repo.join("src");
     let forbidden = [
+        // memory domain (state store)
         ".state_store.",
         ".state_store()",
+        // provider domain
         ".providers.",
         ".providers()",
+        // tool domain
         ".tools.",
         ".tools()",
+        // mcp domain direct manager handles
+        ".mcp_manager.",
+        ".mcp_manager()",
+        "services::mcp_manager",
+        "::mcp_manager::",
+        "McpManager",
     ];
     let allow_prefixes: BTreeSet<&str> = BTreeSet::from([
         "src/lib.rs",
@@ -82,7 +91,9 @@ fn direct_backend_access_only_in_boundary_modules() {
         "src/plugins/lifecycle.rs",
         "src/runtime/mod.rs",
         "src/security/capability_admission.rs",
+        "src/services/mod.rs",
         "src/services/mediator.rs",
+        "src/services/mcp_manager.rs",
         "src/services/relation_facade.rs",
         "src/tools/mod.rs",
         "src/providers/mod.rs",
@@ -106,14 +117,98 @@ fn direct_backend_access_only_in_boundary_modules() {
         };
         for (idx, line) in body.lines().enumerate() {
             if forbidden.iter().any(|token| line.contains(token)) {
-                violations.push(format!("{rel}:{}:{}", idx + 1, line.trim()));
+                let domain = if line.contains(".providers.") || line.contains(".providers()") {
+                    "provider"
+                } else if line.contains(".tools.") || line.contains(".tools()") {
+                    "tool"
+                } else if line.contains("mcp_manager") || line.contains("McpManager") {
+                    "mcp"
+                } else {
+                    "memory"
+                };
+                violations.push(format!("{rel}:{}:[{domain}] {}", idx + 1, line.trim()));
             }
         }
     }
 
     assert!(
         violations.is_empty(),
-        "direct backend access leaked outside boundary modules:\n{}",
+        "direct backend access leaked outside boundary modules (provider/tool/memory/mcp):\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn no_bypass_ci_gate_provider_tool_memory_mcp() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src_root = repo.join("src");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+
+    let allow_prefixes: BTreeSet<&str> = BTreeSet::from([
+        "src/lib.rs",
+        "src/main.rs",
+        "src/command_dispatch.rs",
+        "src/dashboard_server.rs",
+        "src/agent/mod.rs",
+        "src/cli_runtime/command_registry.rs",
+        "src/orchestration/mod.rs",
+        "src/orchestration/knowledge_context.rs",
+        "src/orchestration/org_context.rs",
+        "src/plugins/lifecycle.rs",
+        "src/runtime/mod.rs",
+        "src/security/capability_admission.rs",
+        "src/services/mod.rs",
+        "src/services/mediator.rs",
+        "src/services/relation_facade.rs",
+        "src/services/mcp_manager.rs",
+        "src/tools/mod.rs",
+        "src/providers/mod.rs",
+    ]);
+
+    let provider_tokens = [".providers.", ".providers()"];
+    let tool_tokens = [".tools.", ".tools()"];
+    let memory_tokens = [".state_store.", ".state_store()"];
+    let mcp_tokens = [
+        ".mcp_manager.",
+        ".mcp_manager()",
+        "services::mcp_manager",
+        "::mcp_manager::",
+        "McpManager",
+    ];
+
+    let mut violations = Vec::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(&format!("{}/", env!("CARGO_MANIFEST_DIR").replace('\\', "/")))
+            .unwrap_or(&file);
+        if allow_prefixes.contains(rel) {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&file) else {
+            continue;
+        };
+        for (idx, line) in body.lines().enumerate() {
+            let domain = if provider_tokens.iter().any(|t| line.contains(t)) {
+                Some("provider")
+            } else if tool_tokens.iter().any(|t| line.contains(t)) {
+                Some("tool")
+            } else if memory_tokens.iter().any(|t| line.contains(t)) {
+                Some("memory")
+            } else if mcp_tokens.iter().any(|t| line.contains(t)) {
+                Some("mcp")
+            } else {
+                None
+            };
+            if let Some(domain) = domain {
+                violations.push(format!("{rel}:{}:[{domain}] {}", idx + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "no-bypass CI gate failed (provider/tool/memory/mcp):\n{}",
         violations.join("\n")
     );
 }
@@ -296,6 +391,37 @@ fn session_id_filesystem_paths_must_be_sanitized() {
     assert!(
         violations.is_empty(),
         "unsanitized session-based filesystem path detected:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn lease_write_path_is_only_via_branch_lease_manager() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src_root = repo.join("src/org_kernel");
+    let mut files = Vec::new();
+    collect_rs_files(&src_root, &mut files);
+    let allow_prefixes: BTreeSet<&str> = BTreeSet::from(["src/org_kernel/coordinator.rs"]);
+    let mut violations = Vec::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(&format!("{}/", env!("CARGO_MANIFEST_DIR").replace('\\', "/")))
+            .unwrap_or(&file);
+        if allow_prefixes.contains(rel) {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&file) else {
+            continue;
+        };
+        for (idx, line) in body.lines().enumerate() {
+            if line.contains("fs::write(") || line.contains("std::fs::write(") {
+                violations.push(format!("{rel}:{}:{}", idx + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "org_kernel lease write no-bypass violated (raw fs writes outside coordinator):\n{}",
         violations.join("\n")
     );
 }

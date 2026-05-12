@@ -143,7 +143,7 @@ try {
   $results += Invoke-Step -Name "postgres-schema-bootstrap" -Exe $psqlPath -Argv @("--set", "ON_ERROR_STOP=1", "--dbname", $localPgUri, "--file", ".\\deploy\\sql\\d4_postgres_core_schema.sql")
   $results += Invoke-Step -Name "cutover-status" -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "system", "status")
   $results += Invoke-Step -Name "cutover-health" -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "--session", ($SessionPrefix + "-cutover"), "system", "health")
-  $results += Invoke-Step -Name "postgres-primary-read-check" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "d9_wasm_sandbox_runtime_paths_e2e")
+  $results += Invoke-Step -Name "postgres-primary-read-check" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "d12_storage_postgres_wal_dualwrite_replay_e2e")
 
   Set-StorageCutover -Backend "postgres" -Mode "shadow" -ReadPreference "postgres" -RolloutPercent 0
   $results += Invoke-Step -Name "rollback-status" -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "system", "status")

@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Push-Location $repoRoot
 $backupPath = ""
+$previousAutoLoopProfile = if (Test-Path Env:AUTOLOOP_PROFILE) { $env:AUTOLOOP_PROFILE } else { $null }
 
 try {
   $runtimeDir = Join-Path $repoRoot "deploy\runtime"
@@ -107,8 +108,14 @@ try {
     "pwiki11_memory_chain_e2e"
   )
 
+  $env:AUTOLOOP_PROFILE = "integration"
   foreach ($testName in $pwiki11Tests) {
     $results += Invoke-Step -Name ("pwiki11-" + $testName) -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", $testName)
+  }
+  if ($null -eq $previousAutoLoopProfile) {
+    Remove-Item Env:AUTOLOOP_PROFILE -ErrorAction SilentlyContinue
+  } else {
+    $env:AUTOLOOP_PROFILE = $previousAutoLoopProfile
   }
 
   Set-LocalStorageEndpoints
@@ -154,6 +161,11 @@ try {
   Write-Output ("PWIKI11_ACCEPTANCE_JSON=" + $jsonPath)
 }
 finally {
+  if ($null -eq $previousAutoLoopProfile) {
+    Remove-Item Env:AUTOLOOP_PROFILE -ErrorAction SilentlyContinue
+  } else {
+    $env:AUTOLOOP_PROFILE = $previousAutoLoopProfile
+  }
   if ($backupPath -and (Test-Path $backupPath)) {
     Copy-Item -Path $backupPath -Destination $ProdConfigPath -Force
   }

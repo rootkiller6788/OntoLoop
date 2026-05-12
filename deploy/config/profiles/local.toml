@@ -1,0 +1,22 @@
+# OntoLoop local profile template
+#
+# Usage:
+#   copy this file as deploy/config/autoloop.dev.toml or merge selectively.
+
+[runtime]
+gate_mode = "shadow"
+gate_enforce_ratio = 0.2
+permission_mode = "prompt"
+policy_mode = "shadow"
+
+[observability.alert_thresholds]
+p95_latency_ms = 5000.0
+error_rate = 0.20
+mttr_ms = 300000.0
+open_circuit_count = 5
+
+[observability.signal_pipeline]
+mode = "shadow"
+batch_size = 32
+max_retries = 3
+retry_backoff_ms = 250

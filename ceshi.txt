@@ -1,0 +1,686 @@
+## OntoLoop 四模开发计划 (V6)
+## Plan → Lite → Full → Test
+## OntoLoop = 超级全栈 AI Harness, 接管目标项目从规划到发布全流程
+##
+## 四个模式是针对【目标项目】的操作模式:
+##
+## [Plan] = 读目标项目, 做规划拆解, 不改代码 (只读分析)
+## [Lite] = 简单规划 + 完整执行闭环 + 基础安全 + MCP + 插件。比 opencode 强, 但控制 token
+## [Full] = 全栈全模块企业级接管 (0→1→90%, 宪法治理/演化/证据链全开)
+## [Test] = Full 模式 90% 完成后, 修 bug + 验证 + 浸泡稳定 (90%→100%)
+
+
+════════════════════════════════════════════════════════════
+Plan — 纯规划模式
+（读目标项目, 分析/拆解/规划, 不修改任何代码）
+════════════════════════════════════════════════════════════
+
+定义:
+  只读分析模式。拿到一个目标项目后, OntoLoop 深度理解项目结构、
+  技术栈、代码依赖关系, 产出任务拆解方案和执行路径规划。
+  目标项目在 Plan 模式下零修改。
+
+Plan 模式能力:
+  ✓ 读目标项目: research kernel 爬取/分析项目代码结构
+  ✓ 上下文编译: repo_context_compiler 编译项目全貌给 LLM
+  ✓ RAG 检索: 从组织知识图谱检索相关的历史经验/最佳实践
+  ✓ 记忆注入: 从过往 session 提取相似项目的成功模式
+  ✓ 契约解析: contracts 模块分析项目类型/接口/配置
+  ✓ 任务拆解: org_kernel 的 TaskIntake+RequirementSpec 拆分子任务
+  ✓ 路径规划: 输出执行顺序、依赖关系、风险标注
+  ✓ 不执行: 不调用 shell/git/test/tool, 不产生任何文件变更
+
+Plan 启用模块 (14 个):
+
+  理解项目:
+    M22 research, M20 query_engine(ContextCompiler), M21 rag, M12 memory
+    M07 contracts, M06 config, M15 org_kernel(TaskIntake+RequirementSpec+TaskTree)
+    M14 observability
+  支撑:
+    M02 agent, M19 providers, M05 cli_runtime, M04 bus, M26 session, M29 transport
+
+Plan 关闭 (15 个):
+  M01, M03, M08, M09, M10, M11, M13, M16, M17, M18
+  M20 执行部分(DiffPatch/ShellLoop/TestVerifier/GitCheckpoint/IterController)
+  M23, M24, M25, M27, M28
+  NoumenonCore, ontoloop-core
+
+Plan 阶段:
+  Plan-1: 项目摄入 — 读取目标项目代码结构
+  Plan-2: 上下文编译 — 项目全貌压缩为 LLM 可消化格式
+  Plan-3: 知识注入 — 从组织知识库和历史 session 检索
+  Plan-4: 任务拆解 — 将用户意图拆为可执行子任务树
+  Plan-5: 路径规划 — 确定最优执行路径
+
+
+════════════════════════════════════════════════════════════
+Plan vs opencode Plan 模式 对比
+════════════════════════════════════════════════════════════
+
+Plan 比 opencode plan 多 (6 项):
+  1. 结构化任务拆解 (M15)    拆成子任务树 + 依赖关系 + 预估工时 + 风险标注
+  2. 知识图谱检索 (M21)     从组织知识库检索相关最佳实践/已知陷阱
+  3. 跨项目记忆注入 (M12)   从过往 session 提取相似项目的成功模式
+  4. 31 种契约校验 (M07)    类型/版本/ID/大小/依赖 全面解析项目结构
+  5. Web 研究 (M22)         crawl 外部文档+来源引用, 不只是读本地文件
+  6. 结构化分析日志 (M14)  14 类 telemetry, 分析过程可回溯
+
+Plan 比 opencode plan 少 (0 项):
+  两者都是只读不执行。OntoLoop Plan 只多了分析深度, 没少任何能力。
+
+
+════════════════════════════════════════════════════════════
+Plan Token 优化策略 (最低风险, Plan 只读不执行)
+════════════════════════════════════════════════════════════
+
+原则: Plan 模式零风险(不改代码), token 节省可以比 Lite 更激进。
+      最坏情况只是分析不够深入, 不会破坏目标项目。
+
+P1: 项目结构缓存 (Repo Structure Cache) — 省初次分析 token ★首选
+   开一次 Plan 就要重新 crawl 整个项目? 浪费。
+   优化: 首次分析后缓存 repo 结构(文件树+符号表+依赖图)。后续 Plan 仅在
+         git diff 有变化时增量更新变更部分, 其他复用缓存。
+   节省: 第二次 Plan 省 ~80% 的 repo_context_compiler token
+   风险: 零 (缓存失效时全量刷新, 不会给过期结果)
+
+P2: 惰性 Web 研究 (Lazy Research) — 省 crawl token
+   现状: M22 research 首次 Plan 时自动 crawl 外部资源
+   优化: 仅在以下条件触发:
+         - 用户说"查最新版本/文档/安全公告"
+         - 项目依赖有过期版本 (Cargo.toml/package.json 里有旧版)
+         - 其他情况: 跳过, 仅分析本地代码
+   节省: 70% 的 Plan 会话不需要 crawl, 省 ~3000-8000 token
+   风险: 零 (没 crawl 不会给错误信息, 只是少了一些外部参考)
+
+P3: 知识/记忆按需注入 (On-demand Knowledge) — 省注入 token
+   现状: M21 rag + M12 memory 每次 Plan 都检索并注入上下文
+   优化: 
+         - 用户说"类似XX项目怎么做" → 触发 M12 memory
+         - 用户说"有没有最佳实践" → 触发 M21 rag
+         - 普通需求: 跳过, 直接分析项目结构
+   节省: 60% 的 Plan 请求省 ~2000-4000 token
+   风险: 零 (不注入不会产生幻觉, 只是少了历史参考)
+
+P4: 任务拆解分级 (Graded Decomposition) — 省拆解 token
+   现状: M15 org_kernel 对所有需求做完整 TaskTree
+   优化:
+         - 简单需求(≤2步): 只做 TaskIntake, 不建树
+         - 中等需求(3-5步): TaskIntake + RequirementSpec
+         - 复杂需求(6+步): 完整 TaskTree + ReviewGraph
+   节省: 简单需求省 ~800 token, 中等需求省 ~500 token
+   风险: 零 (简单任务不需要拆成树, 拆了反而过度设计)
+
+P5: 分析上下文缩小 (Smaller Analysis Budget) — 省每轮 token
+   现状: 60% 的 Plan 内容是大段的"代码全文" (直接粘贴文件内容)
+   优化:
+         - 文件内容仅保留签名/注释/关键路径, 不贴完整文件
+         - RepoContextCompiler 默认只给结构+符号, 需要时展开
+         - 对大文件(>500行)只贴前100行+关键函数
+   节省: 大项目分析省 ~40-60% token
+   风险: 极低 (总览时不需要全文, 需要展开时 Plan 阶段5会展开)
+
+P6: 增量分析 (Incremental Update) — 省重复分析 token
+   现状: 每次 Plan 都从头分析整个项目
+   优化: 同一 session 内后续 Plan 请求仅分析上次 Plan 之后变更的部分
+   节省: 后续 Plan 省 ~70-90% token (只分析 diff)
+   风险: 零 (用 git diff 精确追踪变更)
+
+汇总:
+  首次 Plan: 优化后省 ~20-30% (P2+P4+P5)
+  重复 Plan: 优化后省 ~70-90% (P1+P6 叠加)
+  风险等级: 最低 (全优化都是"少读/延迟读/增量读", 不会给错误信息)
+
+
+════════════════════════════════════════════════════════════
+Lite — 普通模式
+（简单规划 + 完整执行闭环 + 基础安全 + MCP + 插件。比 opencode 增强版, 控制 token）
+════════════════════════════════════════════════════════════
+
+定义:
+  OntoLoop 在目标项目上日常工作。有规划(任务拆解), 有完整代码闭环,
+  有基础安全, 有 MCP 工具发现, 有前端插件扩展。
+  比 opencode build 模式多: 规划/安全/记忆/验证闭环/结构化修改。
+  不像 opencode 少任何东西——LSP/MCP/TUI插件全补齐。
+
+OntoLoop 在 Lite 模式下做的事情:
+  ✓ Plan 全部分析能力 (理解项目+拆解任务)
+  ✓ 完整代码闭环: QueryLoop→DiffPatch→ShellLoop→TestVerifier→GitCheckpoint→IterController
+  ✓ 基础安全: 文本扫描(凭证+注入) + 权限检查
+  ✓ MCP 工具发现: MCP manager 连接外部工具服务
+  ✓ TUI 插件: LSP 跳转/诊断 + 前端插件 API 扩展
+  ✓ 工具访问: read+write 工具, 不验证 trust 状态
+  ✓ 会话管理: 基础 session store, 无 checkpoint
+  ✓ 不启用: 演化/级联安全/复杂编排/宪法治理
+
+Lite 启用模块 (18 个):
+
+  Plan 能力 (继承):
+    M22 research, M20 query_engine(ContextCompiler), M21 rag, M12 memory
+    M07 contracts, M06 config, M15 org_kernel(基础拆解)
+    M14 observability, M02 agent, M19 providers, M05 cli_runtime
+    M04 bus, M26 session, M29 transport
+
+  执行闭环:
+    M20 query_engine → 完整闭环: DiffPatch+ShellLoop+TestVerifier+GitCheckpoint+IterController
+    M28 tools        → 工具访问 (read+write, 不验证 trust)
+    M23 runtime      → 执行内核 (guard=shadow, breaker=off)
+
+  基础安全:
+    M24 security     → 仅 S1(inspect_text) + S2(authorize_action)
+
+  MCP + 插件 (补齐 opencode 有的):
+    M25 services     → MCP manager (工具发现+连接)
+    M18 plugins      → 基础插件生命周期 (前端 LSP/主题/语法高亮, 不启用签名验证)
+
+Lite 关闭 (11 个):
+  M01, M03, M08, M09, M10, M11, M13, M16, M17, M24(S3-S9), M27
+  NoumenonCore, ontoloop-core
+
+
+════════════════════════════════════════════════════════════
+Lite vs opencode build 模式 对比
+════════════════════════════════════════════════════════════
+
+Lite 比 opencode 多 (15 项):
+  1. 任务拆解 (M15)          复杂需求自动拆子任务树
+  2. DiffPatch 精确修改       只改目标行, 不改无关代码
+  3. TestVerifier 自动验证    改完自动跑测试, 不通过回退
+  4. GitCheckpoint 安全网     改前 commit, 失败一键还原
+  5. ShellLoop 安全执行       shell 超时/输出限制/安全策略
+  6. IterationController 重试 失败分类+修复策略+自动重试
+  7. 凭证泄露检测             拦截 sk-*** / BEGIN KEY / password=
+  8. 提示注入检测             拦截 jailbreak / 指令越权
+  9. RBAC 权限检查            Read/Write/Dispatch 分级拦截
+  10. 记忆跨会话              CausalEdge+SkillRecord 经验复用
+  11. GraphRAG 知识检索       从知识图谱检索, 非纯向量
+  12. Web 研究 (M22)          crawl 外部资源 + 来源引用
+  13. 契约校验 (31种)         类型/版本/ID/大小 编译+运行时校验
+  14. Repo 上下文编译         仓库全貌压缩为 LLM 上下文
+  15. 结构化观测 (14类)       telemetry + policy signals
+
+Lite 比 opencode 少 (0 项):
+  ✓ LSP → 已补齐 (前端复用 opencode LSP)
+  ✓ TUI 插件 → 已补齐 (M18 plugins)
+  ✓ MCP → 已补齐 (M25 services MCP manager)
+  Lite 不再比 opencode 少任何能力。
+
+
+════════════════════════════════════════════════════════════
+Lite Token 优化策略 (防燃烧)
+════════════════════════════════════════════════════════════
+
+问题: Lite 18 模块全开后每次请求可能消耗大量 token (记忆注入+RAG检索+任务拆解+多次重试)
+
+策略 (6 条, 每个都有量化的 token 节省):
+
+  T1: 惰性检索 (Lazy Fetch) — 省检索 token
+    现状: 每次请求都做 M12 memory + M21 rag 检索
+    优化: 仅在以下条件触发检索:
+      - 用户显式提及历史项目/经验 → 触发 M12 memory
+      - 用户问"怎么实现"/"有没有参考" → 触发 M21 rag
+      - 跨 session 续接 → 自动触发 memory
+      - 其他情况: 跳过检索, 省 ~2000-4000 token/请求
+    估算: 70%的日常请求不需要记忆/RAG, 省 ~2500 token/请求
+
+  T2: 任务复杂度门控 (Complexity Gate) — 省拆解 token
+    现状: 所有请求都进 M15 org_kernel 拆解
+    优化:
+      - 单步任务 (read_file, fix typo, rename): 跳过拆解, 省 ~800 token
+      - 2-3 步任务: 轻量拆解 (仅 TaskIntake)
+      - 4+ 步任务: 完整拆解 (TaskIntake+RequirementSpec+TaskTree)
+    估算: 60%的日常请求是单步, 省 ~800 token/请求
+
+  T3: 迭代上限收紧 — 省重试 token
+    现状: IterationController 默认 max_attempts=5
+    优化: Lite 模式 max_attempts=2, 失败后给用户清晰错误而非无线重试
+    估算: 失败场景省 ~3000-8000 token (少 3 次 LLM 调用)
+
+  T4: 上下文窗口上限 (Lite Token Budget) — 省每轮 token
+    现状: 默认 budget 较大 (32000 token)
+    优化: Lite 模式默认 budget=12000 token, Compactor 在 80% 时触发
+    估算: 超大上下文场景省 ~10000+ token/请求
+
+  T5: 研究惰性化 (Research on-demand) — 省 crawl token
+    现状: M22 research 首次分析项目时自动 crawl
+    优化: 仅在显式 `/research` 命令或"查一下最新文档"时触发
+    估算: 省掉不必要的 web crawl 耗时 + crawl 结果注入 token
+
+  T6: 上下文缓存 (Repo Context Cache) — 省编译 token
+    现状: 每次请求都重新 RepoContextCompiler 编译
+    优化: repo 结构未变化(无 git commit)时复用上次编译结果
+    估算: 同 session 内 80% 请求命中缓存, 省 ~1500 token/请求
+
+汇总 (估算):
+  优化前: 单次请求平均 ~8000-15000 token
+  优化后: 单次请求平均 ~4000-7000 token
+  节省: ~40-50%
+
+
+Lite 阶段:
+
+  Lite-1: 0→10% — 最小可启动
+    目标: 能启动, 对目标项目做一次分析
+    模块: M06 + M02 + M19 + M05 + M22
+    测试: 启动成功, 识别项目语言/框架
+
+  Lite-2: 10→30% — 完整执行闭环
+    目标: plan→code→verify→fix 完整循环
+    模块: +M20(完整6子) + M28 + M04
+    测试: DiffPatch精确改+ShellLoop安全运行+TestVerifier+GitCheckpoint
+
+  Lite-3: 30→60% — 规划+记忆+安全+MCP+插件
+    目标: 补齐 opencode 所有能力并超越
+    模块: +M15(拆解) + M12 + M21 + M24(S1+S2)
+          + M07 + M26 + M14 + M29 + M25(MCP) + M18(插件)
+    测试:
+      ✓ 复杂需求自动拆为子任务
+      ✓ 记忆/知识检索辅助代码生成
+      ✓ 凭证泄露+提示注入被拦截
+      ✓ MCP 工具发现成功
+      ✓ LSP 跳转/诊断正常工作
+      ✓ 52 条 benchmark 成功率 >0.65
+
+  Lite-4: Token 优化 + 稳定
+    目标: 实施 T1-T6 优化, 验证 token 节省和稳定性
+    测试:
+      ✓ 100 次日常请求 token 消耗统计 (优化前后对比)
+      ✓ 优化后成功率不下降 (>0.65)
+      ✓ 惰性检索/复杂度门控/缓存命中率 >70%
+      ✓ 52 条 benchmark 全跑 + 24 并发 session 稳定
+
+
+════════════════════════════════════════════════════════════
+Full — 全量模式
+（全部 29 模块 + 6 crate 全开, 企业级接管目标项目, 0→1→90%）
+════════════════════════════════════════════════════════════
+
+定义:
+  OntoLoop 以企业级完整能力接管目标项目。
+  宪法治理/自演化/安全纵深/证据链/多Agent编排/知识图谱全开。
+
+Full 比 Lite 多出:
+  ✓ 编译期门禁: build.rs 扫描防绕过
+  ✓ 宪法治理: ontoloop-core 四条门控
+  ✓ 信任内核: NoumenonCore 11 步责任链
+  ✓ 9 层纵深安全: M24 S1-S9
+  ✓ 证据链: 哈希链可回放
+  ✓ 断路器: 故障自动熔断恢复
+  ✓ 自演化: EvolutionOS 九步 + shadow→canary→full 四级
+  ✓ 多Agent编排: org_kernel 完整 + orchestration
+  ✓ Bandit 路由: 自动最优 provider/tool
+  ✓ 插件签名: M18 签名验证
+  ✓ Dashboard: SSE 看板
+  ✓ 技能管线: M27 foundry 8 阶段
+
+启用模块: 全部 29 个 + 6 crate
+
+Full vs opencode (LSP/MCP/插件在 Full 模式全开):
+  ✓ LSP 集成: M18 plugins 完整启用 + 前端 LSP 跳转/诊断
+  ✓ TUI 插件系统: M18 plugins 签名验证 + 前端完整插件 API
+  ✓ MCP 服务发现: M25 services 完整 MCP manager + 工具发现+连接+生命周期
+  Full 模式这三个能力不仅不缺, 还比 opencode 多了签名验证和受控生命周期
+
+Full 阶段:
+  Full-1: 0→1%   宪法+门禁先行
+  Full-2: 1→20%  核心运行时+安全纵深
+  Full-3: 20→50% 治理+编排+智能
+  Full-4: 50→75% 自演化+可观测
+  Full-5: 75→90% 全模块集成冒烟
+
+
+════════════════════════════════════════════════════════════
+Full Token 优化策略 (附加, 前提: 稳定执行不受影响)
+════════════════════════════════════════════════════════════
+
+原则: Full 模式优先稳定性和正确性, token 节省是锦上添花, 绝不为此牺牲:
+  - 安全拦截不削减 (M24 9 层全开不能降)
+  - 证据链不跳过 (M23 evidence_ledger 每条记录必须写)
+  - 宪法门禁不绕过 (ontoloop-core 每条写入必须过)
+  - 演化影子跑 (M10 异步, 不影响主请求)
+
+F1: 证据批量写入 (Evidence Batching) — 省写入开销
+   现状: 每个 step 结束后立即写一条 EvidenceRecord, 造成多次存储 IO
+   优化: 每个 execution 内攒够 5 条或执行结束时批量 flush
+   节省: IO 次数减少 60-80%, 不影响证据完整性(内容不变, 只是批次写)
+   风险: 进程崩溃可能丢失最后几条未 flush 的 evidence → 极低概率 + 可接受
+
+F2: 上下文编译缓存 (Repo Context Cache) — 省编译 token
+   现状: 每次请求都重新 RepoContextCompiler 编译项目全貌
+   优化: repo 无 git 变更时复用上次编译的上下文, 仅增量更新变更文件
+   节省: 同 session 80% 请求命中缓存, 省 ~1500 token/请求
+   前提: 必须验证 git diff 无变化才复用, 不能拿过期上下文执行
+
+F3: 断路器减少无效重试 (Smarter Breaker) — 省重试 token
+   现状: M23 R2 circuit_breaker 熔断后仍可能被 IterController 唤醒重试
+   优化: 断路器 Open 状态时 IterController 跳过重试, 直接走降级路径
+   节省: 断路器场景省 3-5 次无效 LLM 重试, ~5000-15000 token
+   前提: 断路器判断准确(不误熔断), 降级路径可用
+
+F4: Bandit 路由选优免试错 (Routing Efficiency) — 省试错 token
+   现状: M16 orchestration Bandit 引擎在初期需要试错(探索 vs 利用)
+   优化: 用 M12 memory 的历史 provider 成功率 warm-start Bandit 先验
+   节省: 前 10 轮试错减少 50%, 省 ~2000-5000 token
+   前提: 历史记忆准确, 不固化过时偏好
+
+F5: Session 检查点压缩 (Checkpoint Compression) — 省存储+恢复 token
+   现状: M26 session checkpoint 全量序列化 state_store 快照
+   优化: 仅保存增量 diff (两次 checkpoint 之间的 key 变化), 恢复时重放
+   节省: checkpoint 大小减少 70-90%, 恢复时不加载无关 key
+   前提: diff 重放必须精确, 不能丢任何 key
+
+F6: 演化异步分流 (Evolution Offload) — 主请求不受演化影响
+   现状: M10 EvolutionOS shadow_cycle 虽然是 tokio::spawn 异步,
+         但候选生成/世界线评分过程中可能抢 provider 配额
+   优化: 演化专用的 provider 连接池 (独立于主请求), 配额隔离
+   节省: 主请求不被演化抢 token, p95 延迟稳定
+   前提: 演化不能用主 provider 池, 需要独立配置
+
+F7: 技能 Foundry 缓存 (Skill Cache) — 省重建 token
+   现状: M27 skills foundry 每次技能变更后重建整个管线
+   优化: 管线各阶段产物缓存(intake→extract→route→build→validate→package),
+         仅变更的技能对应的阶段才重新计算
+   节省: 技能更新时重建开销减少 80%
+   前提: 缓存失效逻辑正确, 不能用过期的 pipeline 产物
+
+汇总:
+  - F2上下文缓存 + F5检查点压缩: 即时生效, 零风险
+  - F3断路器联动 + F4路由预热: 中期生效, 需历史数据积累
+  - F1证据批写 + F6演化隔离 + F7技能缓存: 需要代码改动, 中期
+  - 总体节省: ~15-25% (保守, 因为安全/证据/宪法不能动)
+  - vs Lite节省(~40-50%): Full 省得少但更安全, Lite 省得多但功能降级
+
+
+════════════════════════════════════════════════════════════
+Test — 测试模式
+（Full 模式 90% 完成后, 修 bug + 验证 + 浸泡, 90%→100%）
+════════════════════════════════════════════════════════════
+
+定义:
+  Full 模式把目标项目做到 90% 完成度, 但系统里充满 bug。
+  Test 模式不写新功能, 专注修 bug + 补测试 + 验证 + 稳定化。
+
+验证维度 (V1-V8):
+  V1: 崩溃清零 — 82 benchmark × 3 → 0 panic
+  V2: 静态门禁 — build.rs + 7 lint → 0 违反
+  V3: 安全验证 — 200 对抗攻击 拦截率>0.95, 误报<0.03
+  V4: 功能回归 — 85 单测全绿, 82 benchmark 达标
+  V5: 证据链   — 篡改 100% 检测, replay 100% 可复现
+  V6: 演化正确 — 9步管线正确, 劣化拦截达标
+  V7: 浸泡稳定 — 6h run, 无内存泄漏, breaker trip<10
+  V8: 性能达标 — p95<2×Lite, Compactor>40% 压缩
+
+Test 阶段:
+  Test-1: 90→93%  crash清零+静态门禁
+  Test-2: 93→96%  安全验证+功能回归
+  Test-3: 96→98%  证据链+演化+浸泡
+  Test-4: 98→100%  性能+文档+发布
+
+
+════════════════════════════════════════════════════════════
+Test Token 优化策略 (瓶颈不是单次请求, 而是全量验证套件)
+════════════════════════════════════════════════════════════
+
+Test 模式的 token 大头不是单次请求, 而是跑全量验证:
+  82 benchmark × 3 遍 = 246 次 LLM 调用
+  + 200 条对抗攻击 (每条 1 次 LLM)
+  + 6h 浸泡 (持续产生 LLM 调用)
+  + 50 条证据链执行 (每条 N 步 × N 次 LLM)
+  → 总量是 Lite/Full 单次请求的 100-500 倍
+
+原则: 出 bug 后只重跑受影响的验证, 不重跑全世界。
+
+T1: 增量验证 (Incremental Verification) — 省重复验证 ★核心
+   现状: 修了一个模块的 bug 后, 把 V1-V8 全量重跑一遍
+   优化: 根据修改的模块, 只重跑受影响的验证:
+         - 改了 M24 S5(learning_gate) → 只重跑 V3 的安全对抗
+         - 改了 M20 DiffPatch → 只重跑 V4 中与该引擎相关的 benchmark 子集
+         - 改了 M23 evidence_ledger → 只重跑 V5 证据链
+         - 改了配置/M05→重跑全部 (影响面大)
+   实现: 维护 {模块 → 影响的验证维度+benchmark子集} 映射表
+   节省: 70-90% (大多数 fix 只影响 1-2 个维度, 不必跑全部 8 个)
+   风险: 极低 (映射表可审查, 不确定时保守重跑)
+
+T2: 失败优先 (Failed-First Rerun) — 省回归轮次
+   现状: 82 benchmark 全跑后发现 5 个失败, 修了 1 个后重跑全部 82
+   优化: 修了 1 个后先只重跑这 1 个(验证修复), 再重跑之前失败的 5 个(验证无回退),
+         最后才重跑全部 82(确认无新问题)
+   节省: 每轮修复省 80-90% benchmark token
+   风险: 零 (修复→局部验证→全量验证的分层策略)
+
+T3: 安全测试分级 (Graded Security Testing) — 省对抗 token
+   现状: 任何改动后都跑全部 200 条对抗攻击
+   优化:
+         - 改了 S1(inspect_text) → 跑全部 200 条
+         - 改了 S2(authorize_action) → 跑权限相关 50 条
+         - 改了 S5(learning_gate) → 跑 proposal 相关 50 条
+         - 改了非安全模块 → 跑快速冒烟 20 条(覆盖主要攻击类)
+   节省: 非安全改动省 90% 对抗测试 token
+   风险: 低 (冒烟 20 条仍覆盖所有攻击类别, 不会漏大类)
+
+T4: 浸泡预热 (Soak Warm-up) — 省长跑 token
+   现状: 每次都跑满 6h 浸泡
+   优化:
+         - 首次跑 1h → 无问题 → 续到 2h → 无问题 → 续到 6h
+         - 任何阶段发现问题 → 停止, 修复, 从 1h 开始重跑
+         - 连续 3 次 1h 无问题 → 置信度够高, 跑 6h 一次确认
+   节省: 多次修复场景省 60-80% 浸泡 token (大多数修复不会引入新长期 bug)
+   风险: 无 (发现即停止, 不存在"没发现但实际有问题")
+
+T5: 证据链采样 (Evidence Sampling) — 省证据验证 token
+   现状: V5 每次跑 50 条证据 + 25 条篡改 = 75 条执行
+   优化:
+         - 首次: 全量 75 条
+         - 证据链相关代码改动后: 全量 75 条
+         - 非相关改动后: 采样 15 条(随机抽)
+         - 发布前: 全量 75 条
+   节省: 中间修复轮次省 80% 证据验证 token
+   风险: 低 (采样覆盖不同 step 类型, 未改动的证据逻辑不会突然失效)
+
+T6: 并行验证 (Parallel Verification) — 省墙钟时间
+   现状: V1→V2→V3→V4→V5→V6→V7→V8 串行
+   优化:
+         - 独立维度并行: V1(崩溃)+V2(静态) 并行, V3(安全)+V5(证据) 并行
+         - Benchmark 按任务类别分片并行 (简单/中等/复杂 各一个 worker)
+   节省: 墙钟时间减少 50-70%, token 总量不变, 但等人等结果的时间砍半
+   风险: 零 (独立验证没有竞态)
+
+T7: 静态优先 (Static-First) — 省不必要的 LLM 调用
+   现状: V2(静态) 和 V4(功能) 可能同时跑, 即使 V2 没通过
+   优化: 先跑免费检查(V1崩溃+V2静态 = 几乎零 token), 通过后才跑需要 LLM 的验证
+   节省: V1/V2 不通过时省掉后续所有 LLM 调用
+   风险: 零
+
+汇总:
+  - T1+T2+T7: 必做, 省大量无效重跑
+  - T3+T4+T5: 根据改动范围自适应
+  - T6: 墙钟优化, 不省 token 但省时间
+  - 整体: 与"修复→全量重跑"比, 省 60-80% 验证 token
+  - 风险: 全部低/零风险 (保守策略: 不确定时跑全量, 从不跳过)
+
+
+════════════════════════════════════════════════════════════
+产品验证层 — 真实环境验证 (Test-4 之后执行)
+════════════════════════════════════════════════════════════
+
+定义:
+  工程验证层(V1-V8)证明"功能对不对"——用构造的 benchmark 和对抗样本。
+  产品验证层证明"真的有用解决现实问题"——用真实项目+真人员工+真实攻击。
+  每一模式都要走一遍产品验证, 但不同验证侧重不同模式:
+    表: Plan → PV1(规划质量)+PV4(分析深度)
+    Lite → PV1(任务成功率)+PV4(日常体验)+PV6(安全可用性)
+    Full → PV1(复杂任务)+PV2(安全渗透)+PV3(浸泡)+PV5(跨项目迁移)
+    Test → PV1(修复率)+PV3(稳定性)+V1-V8(工程验收)
+  不跑虚构的 benchmark, 不上自己写的对抗数据集。
+
+
+PV1: 真实开源项目接管 (3 项目 × 每个模式都跑)
+  目标: 证明 Plan/Lite/Full/Test 对陌生真实项目都有用
+  选型: 3 个 Rust 开源项目 (不用 OntoLoop 自己, 不同规模/不同领域)
+    - 小型: 1-3 万行, 单一 crate
+    - 中型: 5-15 万行, workspace 多 crate
+    - 大型: 20 万行+, 复杂依赖
+  操作: 每个项目挑 20 个真实 GitHub issue
+    - Plan: 读项目→出任务拆解+路径规划 (人工评分: 拆解合理性 1-5)
+    - Lite: 改前 10 个 issue → 跑项目自带 test suite
+    - Full: 改后 10 个 issue → 安全+证据+演化全开
+    - Test: 修 Full 阶段产生的 bug → 验证修复率
+    - 对比基线: 同 10 个 issue 用 opencode 改, 对比成功率/token
+  各模式指标:
+    Plan: 拆解合理率 (人工评分), 分析准确度
+    Lite: 成功率 / 首次成功率 / 修改精确度 / token vs opencode
+    Full: 成功率 / 安全拦截次数 / 证据 replay 通过率 / 演化提案质量
+    Test: 修复成功率 / bug 回归率
+  预期: 成功率 >0.70, 修改精确度 >0.85, Full 成功率不显著低于 Lite(+安全开销)
+  失败分析: 每个失败 issue 逐案分析根因
+
+
+PV2: 红队安全渗透 (针对 Full 模式 M24+M25+build.rs+ontoloop-core+NoumenonCore)
+  目标: 证明安全不是纸糊的
+  执行: 找 1-2 个有安全背景的人, Full 全开, 让他们尝试:
+    A) 绕过 SecurityPolicy → 让系统执行 creds 泄露/注入的代码
+    B) 绕过 build.rs → 在非白名单文件直接调 state_store
+    C) 绕过 ontoloop-core → 不经过宪法门禁做生产写入
+    D) 绕过 M25 ServiceMediator → 直接调 provider/tool 绕开安全
+    E) 绕过 supply_chain → 注册恶意 tool manifest 并执行
+    F) 绕过 learning_gate → 注入毒化 proposal 并使其晋升
+    G) 多轮拆解攻击: 分 5 步绕过(每步单独无害, 组合后有害)
+  指标:
+    ✓ bypass 成功次数 (目标: 0)
+    ✓ 最薄弱环节 (哪层先被突破/被逼近)
+    ✓ 误报: 红队在尝试过程中有没有正常操作被误拦
+    ✓ S1-S9 拦截贡献排名 (谁拦截最多)
+    ✓ 攻击痕迹: 即使攻击失败, M23 证据链是否记录了尝试?
+  产出: 安全渗透报告
+
+
+PV3: 72h 长期浸泡 (针对 Full 模式)
+  目标: 证明没有隐蔽的内存泄漏/断路器误触发/状态污染
+  执行: Full 全模块 + 混合异构任务流(读写/shell/git/rag/演化 同时跑)
+    - 0-24h: 观察内存 RSS 曲线, 断路器 trip 次数
+    - 24-48h: 观察 token 消耗是否随时间上升(上下文膨胀)
+    - 48-72h: 观察演化产出质量(是否产生有害提案)
+    - 每 6h 打一次 circuit_snapshot + memory profile
+  指标:
+    ✓ 内存增长 <15% over 72h (RSS)
+    ✓ 断路器 trip <50 次/72h (平均 <1 次/h)
+    ✓ 断路器 MTTR <60s
+    ✓ 上下文膨胀率 (第 72h 上下文大小 / 第 1h)
+    ✓ 演化提案质量 (人工抽查 20 条, 有效提案率)
+    ✓ 证据链无断裂 (72h 无 hash mismatch)
+    ✓ 0 次 OOM / 0 次 ungraceful exit
+  失败: 任何内存泄漏 → heaptrack/valgrind 定位 + 修复
+
+
+PV4: 真人日常开发 (针对 Lite 模式, 辅测 Plan 分析质量)
+  目标: 证明真实开发者愿意用、不觉得碍事
+  执行: 找 2-3 个开发者, 用 Lite 模式做一天真实工作
+    - 不能用 opencode/其他工具
+    - 随意提问 (不限定 benchmark)
+    - 记录所有交互 (输入/输出/耗时/token)
+    - 每 2h 问一次: 给当前体验打分(1-5)
+  指标:
+    ✓ 任务完成满意度 (开发者自评: 帮到了吗? 1-5)
+    ✓ TTFR p50/p95 (从提问到首次有效响应)
+    ✓ 误拦截率 (开发者想做什么被安全拦截了)
+    ✓ Token/小时 (开发者关心的成本)
+    ✓ Plan 规划质量: 开发者评价拆解是否合理?
+    ✓ 最常用功能 TOP3 和最烦功能 TOP3
+    ✓ 是否愿意明天继续用? (是/否)
+  产出: 真实反馈报告
+
+
+PV5: 跨项目知识迁移 (Plan/Lite/Full 受益, 在 PV1 三项目串行中测量)
+  目标: 证明 M12 memory + M21 rag + M10 evolution 跨项目有效
+  执行: 在 PV1 的 3 个项目上依次跑 Plan→Lite→Full
+    - 项目 A → 积累记忆/知识/演化经验
+    - 项目 B → 看记忆/RAG 是否从 A 注入有用上下文
+    - 项目 C → 看演化是否已学会项目 A+B 的模式
+  各模式受益验证:
+    Plan: B 的 Plan 分析是否因为 A 经验而更准确/更快?
+    Lite: B 的 Lite 首次成功率 vs A 的首次成功率 (经验注入应提升)
+    Full: C 的 Full 成功率 vs B 的 Full 成功率 (演化应持续提升)
+  指标:
+    ✓ 跨项目成功率单调递增 (C > B > A)
+    ✓ Token 节省 (后面项目不需要从头分析陌生技术栈)
+    ✓ 记忆注入相关性 (检索到的记忆是否与当前任务相关)
+    ✓ 演化跨项目提案有效率
+  预期: C > B > A
+
+
+PV6: 真人安全验证 (针对 Lite+Full 的安全层在真实使用中的表现)
+  目标: 不是安全专家, 是普通开发者无意中的安全行为
+  执行: PV4 的 2-3 个开发者的 1 天交互 + PV1 Full 阶段数据, 事后人工审查:
+    - 他们有没有尝试执行"实际上危险"的操作?
+    - 安全层拦截了哪些?
+    - 安全层有没有误拦正常操作?
+  各模式安全数据:
+    Lite: S1+S2 在 Lite 中的误报率和漏报率
+    Full: S1-S9 在 Full 中的误报率和漏报率
+  指标:
+    ✓ 真实误报率 (开发者想做什么被拦, 且被拦是错的)
+    ✓ 真实漏报率 (开发者做了什么危险操作, 但安全层没拦)
+    ✓ 安全感知: "安全是在保护我还是在碍事?"
+  产出: 安全可用性报告
+
+
+════════════════════════════════════════════════════════════
+模块×模式 对照矩阵
+════════════════════════════════════════════════════════════
+
+模块                        Plan              Lite              Full           Test
+───────────────────────────────────────────────────────────────────────────────────────
+S档
+M25 services + build.rs    关                 MCP only          全开           全开+扫描
+M10 evolution_os           关                 关                 全开           全开+演化
+ontoloop-core              关                 关                 全开           全开+门控
+───────────────────────────────────────────────────────────────────────────────────────
+A档
+M24 security               关                 S1+S2              9子全开        全开+安全
+M23 runtime                关                 基本(guard=shadow)  13子全开       全开+执行
+M20 query_engine           仅上下文编译       完整闭环(6子)      14子全开       全开+引擎
+NoumenonCore               关                 关                 全开           全开+重放
+M15 org_kernel             拆解(3子)          拆解(3子)+门控     8子全开        全开+编排
+M16 orchestration          关                 关                 全开           全开+路由
+M09 evolution              关                 关                 全开           全开+协同
+───────────────────────────────────────────────────────────────────────────────────────
+B档
+M12 memory                 记忆检索           惰性检索           四维全开       全开+记忆
+M26 session                基本store          基本store          checkpoint     全开+恢复
+M21 rag                    知识检索           惰性检索           GraphRAG       全开+检索
+M01 adaptive_framework     关                 关                 全开           全开+收敛
+M19 providers              主provider         主provider         多fallback      全开+切换
+M28 tools                  关                 read+write          trust验证      全开+信任
+M18 plugins                关                 基础(无签名)       签名验证        全开+签名
+M14 observability          分析日志           基础log/metric     全量(14cat)    全开+诊断
+M07 contracts              项目解析           基础校验           31种契约        全开+Fuzzing
+M22 research               项目爬取           按需爬取           全开           全开+来源
+───────────────────────────────────────────────────────────────────────────────────────
+C档
+M02 agent                  编排分析           单worker           swarm           全开+并发
+M06 config                 解析项目配置       local profile      full profile    全开+Fuzzing
+M05 cli_runtime            交互入口           交互入口           全命令          全开+TTFR
+M04 bus                    基础消息           基础消息           全量消息        全开+吞吐
+M29 transport              SSE桥接            SSE桥接            SSE+全桥接     全开+断连
+M08 dashboard_server       关                 关                 全开           全开+渲染
+M11 hooks                  关                 关                 7阶段全开       全开+隔离
+M27 skills                 关                 关                 8阶段管线       全开+命中
+M17 path_safety            关                 关                 全开           全开+遍历
+M03 agentevolver           关                 关                 全开           全开+提案
+M13 module_bindings        关                 关                 动态绑定        全开+安全
+
+
+════════════════════════════════════════════════════════════
+总时间线
+════════════════════════════════════════════════════════════
+
+Plan (纯规划) ............................ 项目规模决定
+Lite (日常 dev agent) ................... 7-14 天
+  Lite-1: 0→10%  最小可启动 ............. 1-2 天
+  Lite-2: 10→30% 完整执行闭环 ........... 2-3 天
+  Lite-3: 30→60% 补齐+MCP+插件 .......... 3-5 天
+  Lite-4: Token优化+稳定 ................ 1-2 天
+
+Full (企业接管) .......................... 12-19 天
+Test (修bug+验证) ........................ 8-12 天
+
+总计: 27-45 天 (约 5.5-9 周)

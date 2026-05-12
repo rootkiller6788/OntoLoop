@@ -420,6 +420,24 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       model,
       agent,
       mcp,
+      get mode() {
+        const modes = ["Plan", "Lite", "Full", "Test"] as const
+        type Mode = (typeof modes)[number]
+        const [modeStore, setModeStore] = createStore<{ current: Mode }>({ current: "Lite" })
+        return {
+          list(): Mode[] { return [...modes] },
+          current(): Mode { return modeStore.current },
+          set(mode: Mode) {
+            setModeStore("current", mode)
+            toast.show({ message: `Mode: ${mode}`, variant: "info", duration: 2000 })
+          },
+          cycle(direction: 1 | -1) {
+            const idx = modes.indexOf(modeStore.current)
+            const next = (idx + direction + modes.length) % modes.length
+            this.set(modes[next])
+          },
+        }
+      },
     }
     return result
   },

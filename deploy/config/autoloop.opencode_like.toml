@@ -1,0 +1,154 @@
+[app]
+name = "ontoloop-opencode-like"
+workspace_root = "."
+
+[agent]
+max_iterations = 8
+memory_window = 64
+system_prompt = "You are OntoLoop opencode-like control baseline."
+
+[runtime]
+max_parallel_agents = 4
+max_memory_mb = 512
+mcp_enabled = true
+allow_network_tools = false
+tool_breaker_failure_threshold = 3
+tool_breaker_cooldown_ms = 180000
+mcp_breaker_failure_threshold = 2
+mcp_breaker_cooldown_ms = 300000
+gate_mode = "shadow"
+gate_enforce_ratio = 0.0
+permission_mode = "strict"
+wasm_module_root = "rule/wasm-modules"
+policy_mode = "off"
+rollback_contract_version = "v1"
+budget_enforced = true
+default_budget_micros = 5000000
+quota_window_ms = 3600000
+quota_window_budget_micros = 1000000
+attestation_required = false
+attestation_backend = "env"
+attestation_remote_url = ""
+attestation_token_env = "AUTOLOOP_ATTESTATION_TOKEN"
+attestation_secret_env = "AUTOLOOP_ATTESTATION_SECRET"
+attestation_quote_env = "AUTOLOOP_ATTESTATION_QUOTE"
+attestation_cert_chain_env = "AUTOLOOP_ATTESTATION_CERT_CHAIN"
+attestation_cert_subject_allowlist = []
+trust_evidence_ledger_path = "deploy/runtime/trust/evidence.log"
+trust_budget_ledger_path = "deploy/runtime/trust/budget.log"
+trust_ledger_consistency_mode = "strong"
+
+[security]
+profile = "opencode-like"
+require_approval_for_exec = false
+ironclaw_compatible_rules = true
+
+[memory]
+load_identity = true
+load_memory_md = false
+load_history_md = false
+
+[learning]
+enabled = false
+sidecar_enabled = false
+index_kind = "flat"
+embedding_dimensions = 128
+top_k = 2
+gray_routing_ratio = 0.0
+routing_takeover_threshold = 2.0
+hot_window_days = 7
+cold_quantization = "none"
+
+[research]
+enabled = false
+backend = "synthetic"
+live_fetch_enabled = false
+max_queries_per_anchor = 1
+max_candidates_per_query = 2
+prefer_official_sources = true
+prefer_dynamic_render = false
+browser_render_url = ""
+browser_session_pool = ["opencode-like-browser"]
+proxy_provider_name = "none"
+proxy_pool = []
+anti_bot_profile = "none"
+rotate_proxy_per_request = false
+proxy_request_quota_per_proxy = 1
+proxy_breaker_failure_threshold = 1
+proxy_breaker_cooldown_ms = 300000
+playwright_node_binary = "node"
+playwright_launch_timeout_secs = 10
+firecrawl_api_url = "https://api.firecrawl.dev"
+firecrawl_api_key_env = "FIRECRAWL_API_KEY"
+self_hosted_scraper_url = ""
+request_timeout_secs = 10
+retry_attempts = 1
+stability_backoff_ms = 50
+user_agent = "ontoloop-opencode-like/0.1"
+
+[rag]
+enable_graph_rag = true
+enable_first_principles_extraction = false
+
+[providers]
+builtin = ["openai-compatible"]
+default_model = "qwen-plus-latest"
+screening_model = "qwen-plus-latest"
+reasoning_model = "qwen-plus-latest"
+judge_model = "qwen-plus-latest"
+enable_tiered_routing = false
+prompt_cache_capacity = 128
+api_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key_env = "OPENAI_API_KEY"
+request_timeout_secs = 60
+mcp_servers = ["local-mcp"]
+
+[tools]
+builtin = ["read_file", "write_file", "web_fetch"]
+allow_shell = false
+mcp_servers = ["local-mcp"]
+
+[hooks]
+builtin = []
+learning_hooks_enabled = false
+
+[observability]
+enabled = true
+route_analytics_enabled = false
+failure_forensics_enabled = false
+dashboard_enabled = false
+report_top_k = 4
+
+[observability.alert_thresholds]
+p95_latency_ms = 180000
+error_rate = 0.1
+mttr_ms = 120000
+open_circuit_count = 1
+
+[deployment]
+profile = "opencode-like"
+enable_container_assets = false
+config_dir = "deploy/config"
+backup_dir = "deploy/backup"
+
+[storage]
+backend = "postgres"
+mode = "direct"
+shadow_read_preference = "postgres"
+shadow_read_rollout_percent = 100
+shadow_write_grace_hours = 24
+
+[storage.postgres]
+enabled = true
+uri = "postgres://postgres:123456@localhost:5432/ontoloop"
+pool_size = 16
+schema = "public"
+app_name = "ontoloop-opencode-like"
+
+[state_store]
+enabled = true
+backend = "in_memory"
+uri = "http://127.0.0.1:3000"
+module_name = "autoloop_core"
+namespace = "autoloop"
+pool_size = 8

@@ -1,0 +1,20 @@
+{
+  "name": "ontoloop-ai",
+  "version": "0.1.0",
+  "description": "OntoLoop AI harness - enterprise-grade autonomous coding agent",
+  "license": "MIT OR Apache-2.0",
+  "bin": {
+    "ontoloop": "./bin/ontoloop.js"
+  },
+  "files": [
+    "bin/",
+    "target/debug/ontoloop.exe",
+    "target/release/ontoloop.exe",
+    "deploy/config/autoloop.lite.toml"
+  ],
+  "keywords": ["ai", "coding", "agent", "autonomous"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anomalyco/autoloop-app"
+  }
+}

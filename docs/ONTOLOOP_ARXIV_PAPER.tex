@@ -1,0 +1,507 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{url}
+
+\title{OntoLoop: A Governed, Replayable Runtime for Sovereign Language-Model Agents}
+
+\author{
+AutoLoop Contributors\\
+\texttt{anomalyco/autoloop-app}\\
+Draft systems paper
+}
+
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Language-model agents are increasingly used as tool-using software operators: they
+plan, call external systems, modify artifacts, learn from feedback, and continue work
+across sessions. Existing agent frameworks have demonstrated strong reasoning,
+tool-use, and self-improvement capabilities, but production use introduces a
+different class of requirements: policy enforcement, tenant isolation, budget
+control, replayability, rollback, and auditable evidence for every consequential
+action. This paper presents OntoLoop, an engineering runtime for governed and
+replayable language-model agents. OntoLoop decomposes agent execution into a
+policy-control layer, planning layer, guarded execution layer, verification layer,
+learning layer, and reporting layer. The runtime centers all provider and tool
+activity around typed task envelopes, tri-state admission decisions, append-only
+evidence records, deterministic replay boundaries, and release gates that block
+production writes when evidence is incomplete. We describe the architecture,
+contracts, implementation, and evaluation protocol of the current open-source
+alpha artifact, implemented primarily in Rust with a Vue control plane and local
+CLI surfaces. Rather than optimizing only for task success, OntoLoop treats agent
+autonomy as a systems problem: every successful action must be attributable,
+bounded, recoverable, and explainable.
+\end{abstract}
+
+\section{Introduction}
+
+Large language models (LLMs) have moved from passive text generation toward
+interactive agents that reason, call tools, inspect environments, write code, and
+adapt over time. Work such as ReAct \cite{yao2022react}, Toolformer
+\cite{schick2023toolformer}, Reflexion \cite{shinn2023reflexion}, Tree of Thoughts
+\cite{yao2023tot}, Voyager \cite{wang2023voyager}, and SWE-agent
+\cite{yang2024sweagent} shows that combining models with tools, feedback, memory,
+and iterative control can greatly expand practical capability. However, capability
+alone is not a runtime contract. A production agent must also answer operational
+questions:
+
+\begin{itemize}
+  \item Which identity, tenant, policy, and budget authorized an action?
+  \item Which tool or provider path was selected, and was it verified at the time?
+  \item What evidence proves that an artifact was actually written, hashed, and
+        linked to the corresponding decision?
+  \item Can an operator replay a session, explain drift, and roll back a failed
+        rollout?
+  \item Can tests and static checks prevent direct bypass of the runtime guard?
+\end{itemize}
+
+OntoLoop is designed around these questions. We use \emph{sovereign runtime} in an
+engineering sense: the local system, not the model provider, owns policy, admission,
+budget, evidence, replay, and rollback boundaries. The objective is not to replace
+model-level alignment methods such as Constitutional AI \cite{bai2022constitutional},
+but to complement them with deterministic software contracts around the agent's
+actions.
+
+The current OntoLoop repository is an alpha engineering artifact. Its Rust workspace
+contains a primary runtime crate, state and PostgreSQL adapters, an immutable
+execution constitution crate, and a trust-kernel crate. The control surfaces include
+a product CLI, a Node-based wrapper, and a Vue dashboard for snapshots, replay,
+capability governance, and operator settings. The repository also contains layered
+acceptance scripts and integration tests that encode the runtime's hard gates.
+
+This paper makes four contributions:
+
+\begin{enumerate}
+  \item A layered architecture for governed LLM-agent execution that separates
+        policy control, planning, execution, verification, learning, and reporting.
+  \item A runtime contract centered on typed task envelopes, tri-state admission,
+        no-bypass enforcement, evidence-linked artifact delivery, and replayable
+        decision records.
+  \item An implementation blueprint for integrating providers, tools, memory,
+        GraphRAG-style knowledge, triggers, session replay, and operator dashboards
+        without allowing direct execution paths around the guard.
+  \item A release-oriented evaluation protocol that treats acceptance gates,
+        rollback evidence, and replay consistency as first-class measures of agent
+        readiness.
+\end{enumerate}
+
+\section{Design Goals}
+
+OntoLoop is built for agent workloads that may touch files, tools, external
+services, memory stores, and business-facing control planes. The design is guided
+by five goals.
+
+\paragraph{G1: All execution passes through one accountable gate.}
+Provider calls, tool calls, MCP-style capability invocations, and artifact writes
+must be mediated by the runtime kernel. The agent should not be able to call a
+high-impact path through an untracked shortcut.
+
+\paragraph{G2: Policy decisions are explicit and typed.}
+Admission returns one of three states: \texttt{Allow}, \texttt{RequiresApproval},
+or \texttt{Blocked}. Every decision carries a reason and evidence linkage.
+
+\paragraph{G3: Evidence is append-only and replayable.}
+Execution produces durable records that bind session identifiers, trace identifiers,
+task identifiers, capability identifiers, policy versions, artifact hashes, and
+decision outcomes.
+
+\paragraph{G4: Learning is governed.}
+Feedback, memory updates, skill promotion, and route optimization are treated as
+runtime events subject to verification and rollback, not as invisible prompt drift.
+
+\paragraph{G5: Release readiness is contract-driven.}
+OntoLoop does not define production readiness as passing a single benchmark. It
+requires layered checks: preflight, contract, domain suites, full-chain acceptance,
+and release gate fusion.
+
+\section{Architecture}
+
+Figure~\ref{fig:flow} shows the canonical execution path as a text diagram. A user
+intent or trigger enters the transport/session layer, is compiled into a structured
+turn state, passes through planning and policy context, executes through guarded
+capability routing, and finally emits evidence, learning updates, replay artifacts,
+and observability reports.
+
+\begin{figure}[h]
+\centering
+\begin{minipage}{0.95\linewidth}
+\begin{verbatim}
+User/Trigger
+  -> Structured Transport + Session Bridge
+  -> Query Turn State Machine + Context Compiler/Compactor
+  -> Requirement Clarification + Constraint Freeze
+  -> Policy Context + Knowledge Context
+  -> Orchestrator + Capability Router
+  -> Capability Admission
+  -> Trust Admission Kernel
+  -> Runtime Guard + Permission Mode
+  -> Layered Tool Execution + Execution Fabric
+  -> Evidence Tagger + Flow State Engine
+  -> Trust Evidence Ledger
+  -> Verifier + Audit
+  -> Learning + Promotion Gate
+  -> Memory / Org Knowledge Update
+  -> Unified Query / Replay / Explanation
+  -> Observability + Reports
+\end{verbatim}
+\end{minipage}
+\caption{Condensed OntoLoop runtime flow.}
+\label{fig:flow}
+\end{figure}
+
+\subsection{Layer Model}
+
+OntoLoop maps high-level agent behavior onto neutral software layers:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Layer & Role & Primary modules \\
+\midrule
+Policy control & Policy, risk, budget, immutable constraints & \texttt{security}, \texttt{runtime}, \texttt{config} \\
+Planning & Clarification, scope freeze, decomposition & \texttt{orchestration}, \texttt{agent} \\
+Execution & Capability selection, tool/provider invocation & \texttt{tools}, \texttt{providers}, \texttt{runtime} \\
+Resource kernel & CPU, memory, time, queue, sandbox control & \texttt{runtime}, \texttt{security} \\
+Verification & Result validation, policy checks, reject loops & \texttt{runtime}, \texttt{observability} \\
+Learning & Evidence, skills, causal edges, route memory & \texttt{memory}, \texttt{rag}, \texttt{hooks} \\
+Reporting & Snapshot, replay, dashboard, health telemetry & \texttt{observability}, \texttt{dashboard-ui} \\
+\bottomrule
+\end{tabular}
+\caption{OntoLoop's neutral layer decomposition.}
+\label{tab:layers}
+\end{table}
+
+\subsection{Runtime Core}
+
+The main Rust application object assembles configuration, providers, tools,
+security policy, memory, RAG, sessions, transport, plugins, services, observability,
+and the runtime kernel. Its CLI exposes command families for focus anchors,
+knowledge export, triggers, bridges, skills, plugins, sessions, background tasks,
+memory, frontend status, and system reports.
+
+The runtime kernel owns:
+
+\begin{itemize}
+  \item resource limits and parallelism windows;
+  \item MCP/tool circuit breaker thresholds and cooldowns;
+  \item gate mode (\texttt{shadow}, \texttt{canary}, or \texttt{full});
+  \item permission-mode defaults and policy-mode defaults;
+  \item budget and quota enforcement;
+  \item attestation configuration;
+  \item hook runtime and layered tool execution.
+\end{itemize}
+
+\subsection{Control Plane}
+
+The dashboard exposes local operational APIs for health, dashboard snapshots,
+replay timelines, capability catalog views, capability governance, operator
+settings, trigger webhooks, and server-sent event streams. The Vue control plane
+renders summary strips, runtime sidebars, graph canvases, capability tables,
+detail workbenches, replay timelines, and governance panels.
+
+\section{Contracts}
+
+OntoLoop's central mechanism is the conversion of agent behavior into explicit
+contracts. The contract layer is intentionally more restrictive than a typical
+agent loop because the system must preserve auditability under failure.
+
+\subsection{Task Envelope}
+
+Every consequential execution is represented as a task envelope:
+
+\begin{verbatim}
+TaskEnvelope {
+  session_id,
+  trace_id,
+  task_id,
+  capability_id,
+  identity,
+  payload,
+  constraints,
+  trust_plan
+}
+\end{verbatim}
+
+The envelope binds an action to identity, constraints, and trace context before
+the runtime can execute it. This gives downstream evidence records stable keys.
+
+\subsection{Admission}
+
+Admission decisions are tri-state:
+
+\[
+  d \in \{\texttt{Allow}, \texttt{RequiresApproval}, \texttt{Blocked}\}.
+\]
+
+The runtime does not treat ``not blocked'' as sufficient. A path that requires
+approval must remain distinct from a path that is automatically allowed. This
+distinction is important for human-in-the-loop operations, gray rollout, and
+post-incident forensics.
+
+\subsection{Production Write Contract}
+
+For production writes, OntoLoop uses a five-part atomic contract:
+
+\[
+  W = (\texttt{state}, \texttt{event\_log}, \texttt{evidence\_ref},
+       \texttt{relation}, \texttt{write\_proof}).
+\]
+
+A write is valid only when all five elements commit together or the transaction
+rolls back. This prevents common failure modes where a state mutation exists
+without evidence, or an event log claims an artifact that was never written.
+
+\subsection{Artifact Delivery}
+
+An artifact-completion claim is invalid without a write proof, hash, and evidence
+reference. This is especially important for coding agents because natural-language
+answers can claim completion even when no file-backed artifact exists.
+
+\subsection{NoBypass}
+
+NoBypass combines three enforcement layers:
+
+\begin{enumerate}
+  \item static scans for direct provider/tool/memory/MCP shortcuts;
+  \item compile-time gates around contract boundaries;
+  \item runtime gates around every task envelope.
+\end{enumerate}
+
+This pattern aims to catch bypass attempts before they become runtime incidents.
+
+\section{Lifecycle}
+
+The canonical lifecycle is:
+
+\begin{enumerate}
+  \item \texttt{INTENT\_INTAKE}: normalize input into a requirement brief.
+  \item \texttt{CONSTRAINT\_FREEZE}: freeze acceptance criteria, risk profile,
+        budget, and hard boundaries.
+  \item \texttt{PLAN\_SYNTHESIS}: generate plans, critiques, and an executable
+        route.
+  \item \texttt{CAPABILITY\_ROUTING}: select only active and verified capabilities.
+  \item \texttt{GUARDED\_EXECUTION}: enforce budgets, timeout, sandbox, and circuit
+        breaker policy.
+  \item \texttt{VERIFICATION\_GATE}: pass, iterate, or reject.
+  \item \texttt{LEARNING\_COMMIT}: persist episodes, witness logs, skill updates,
+        and graph deltas.
+  \item \texttt{OBSERVABILITY\_EMIT}: publish snapshots, replay events, and reports.
+\end{enumerate}
+
+The state machine supports recovery edges. A verifier rejection returns the task
+to planning; a circuit breaker or budget failure returns execution to planning;
+policy denial moves the task to a blocked state.
+
+\section{Memory and Knowledge}
+
+OntoLoop includes a memory subsystem for reflexion episodes, witness logs, skill
+records, causal edges, and SuperMemory-style pipelines. It also includes GraphRAG
+components for entity-relation extraction, graph updates, retrieval, sharing gates,
+and organization knowledge publication. The design is related to GraphRAG
+\cite{edge2024graphrag} in that graph structure is used to support global context
+and sensemaking, but OntoLoop focuses on operational traceability: memory updates
+are linked to evidence and promotion gates.
+
+Learning is therefore not simply prompt accumulation. A learning delta must be
+derived from evidence, scored, verified, and optionally promoted. This prevents
+the agent from silently converting one unverified failure into future policy.
+
+\section{Implementation}
+
+The current artifact is implemented as a Rust workspace with auxiliary frontend
+and deployment surfaces. The inspected repository contains:
+
+\begin{itemize}
+  \item 215 Rust source files under \texttt{src/};
+  \item 85 Rust integration test files under \texttt{tests/};
+  \item 63 acceptance and operations scripts under \texttt{deploy/scripts/};
+  \item 72 frontend source files under \texttt{dashboard-ui/src/}.
+\end{itemize}
+
+The workspace members are:
+
+\begin{itemize}
+  \item \texttt{ontoloop}: the primary runtime and CLI crate;
+  \item \texttt{autoloop-state-adapter}: internal StateStore-compatible state
+        adapter with in-memory and PostgreSQL bridge paths;
+  \item \texttt{autoloop-postgres-adapter}: PostgreSQL-backed state and evidence
+        adapter;
+  \item \texttt{trustkernel}: a verified execution kernel crate housed under
+        \texttt{NoumenonCore};
+  \item \texttt{ontoloop-core}: immutable execution constitution contracts.
+\end{itemize}
+
+The frontend control plane is a Vue 3 and Vite application. The Node package
+wrapper exposes an \texttt{ontoloop} binary that locates the Rust executable and
+launches either direct message mode, subcommand passthrough, or TUI mode.
+
+\section{Evaluation Protocol}
+
+OntoLoop's evaluation protocol is release-oriented. A model-only benchmark can
+measure whether an agent solves a task; OntoLoop additionally asks whether the
+solution is authorized, bounded, attributed, replayable, and recoverable.
+
+\subsection{Layered Acceptance}
+
+The acceptance model contains five layers:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+Layer & Scope & Blocking condition \\
+\midrule
+L0 & profile, config, storage readiness & failed preflight blocks all later layers \\
+L1 & WAL, admission, evidence, NoBypass & any contract breach blocks release \\
+L2 & sandbox, frontend CLI, storage, signals & any required domain failure blocks L3/L4 \\
+L3 & integrated full-chain acceptance & \texttt{all\_passed != true} blocks release \\
+L4 & fused release decision & \texttt{allow\_release=false} blocks rollout \\
+\bottomrule
+\end{tabular}
+\caption{Layered acceptance protocol.}
+\label{tab:acceptance}
+\end{table}
+
+\subsection{Suggested Metrics}
+
+For future empirical submissions, we recommend reporting:
+
+\begin{itemize}
+  \item task success rate under guarded execution;
+  \item percentage of actions with complete evidence records;
+  \item replay match rate and explainable drift rate;
+  \item NoBypass static/compile/runtime coverage;
+  \item rollback latency after canary failure;
+  \item budget reconciliation accuracy;
+  \item tenant isolation violations;
+  \item operator intervention rate and approval latency.
+\end{itemize}
+
+These metrics should be reported by release gate artifacts rather than prose-only
+claims. The current paper intentionally does not invent benchmark numbers for the
+alpha artifact.
+
+\section{Related Work}
+
+\paragraph{Reasoning and tool-use agents.}
+ReAct interleaves reasoning traces and actions \cite{yao2022react}, while
+Toolformer studies self-supervised tool-use learning \cite{schick2023toolformer}.
+OntoLoop assumes such tool-using behavior is useful, but wraps it in explicit
+authorization and evidence contracts.
+
+\paragraph{Search, reflection, and lifelong learning.}
+Tree of Thoughts expands inference into deliberate search over intermediate
+thoughts \cite{yao2023tot}. Reflexion stores verbal feedback in episodic memory
+\cite{shinn2023reflexion}. Voyager demonstrates open-ended skill acquisition in an
+embodied environment \cite{wang2023voyager}. OntoLoop's learning layer is closest
+in spirit to these systems, but it treats skill promotion as a governed runtime
+event rather than an unconstrained memory update.
+
+\paragraph{Software-engineering agents.}
+SWE-agent shows that agent-computer interfaces matter for automated software
+engineering \cite{yang2024sweagent}. OntoLoop adds contract and evidence layers
+around the computer interface: artifact claims require write proofs, and execution
+must pass the runtime guard.
+
+\paragraph{Alignment and policy.}
+Constitutional AI uses rule-based critique and AI feedback for model behavior
+control \cite{bai2022constitutional}. OntoLoop operates at the systems layer:
+policies are evaluated as runtime gates over concrete tasks, identities, tools,
+budgets, and artifacts.
+
+\paragraph{Graph-based retrieval.}
+GraphRAG builds graph indexes and community summaries to improve global
+query-focused summarization \cite{edge2024graphrag}. OntoLoop uses graph memory
+for operational knowledge and routing evidence, with emphasis on provenance and
+promotion gates.
+
+\section{Limitations}
+
+OntoLoop is currently an alpha engineering runtime. Several limitations remain.
+First, the artifact's production hardening is uneven across provider and MCP
+surfaces. Second, rich real-time replay visualization is not yet complete. Third,
+the dashboard and policy administration interfaces are local-operation oriented,
+not a full enterprise identity product. Fourth, quantitative benchmark results
+must be generated by the release scripts and checked into an evidence package
+before this paper can be treated as a results paper rather than a systems design
+paper. Finally, the current repository has substantial ongoing changes; release
+claims should be tied to clean commits and immutable artifacts.
+
+\section{Conclusion}
+
+OntoLoop frames LLM-agent autonomy as a runtime systems problem. The central idea is
+simple: an agent action should not count as complete merely because a model said so
+or a tool returned text. It must be authorized, bounded, executed through a guarded
+path, linked to evidence, replayable, and recoverable. The current alpha artifact
+implements this idea through Rust runtime contracts, typed task envelopes,
+tri-state admission, evidence ledgers, no-bypass checks, session replay, governed
+learning, and layered release gates. This design points toward a class of
+agentic systems where autonomy and accountability are engineered together rather
+than traded against each other.
+
+\begin{thebibliography}{9}
+
+\bibitem{yao2022react}
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao.
+\newblock ReAct: Synergizing Reasoning and Acting in Language Models.
+\newblock \emph{arXiv preprint arXiv:2210.03629}, 2022.
+\newblock \url{https://arxiv.org/abs/2210.03629}
+
+\bibitem{schick2023toolformer}
+Timo Schick, Jane Dwivedi-Yu, Roberto Dessi, Roberta Raileanu, Maria Lomeli,
+Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom.
+\newblock Toolformer: Language Models Can Teach Themselves to Use Tools.
+\newblock \emph{arXiv preprint arXiv:2302.04761}, 2023.
+\newblock \url{https://arxiv.org/abs/2302.04761}
+
+\bibitem{shinn2023reflexion}
+Noah Shinn, Federico Cassano, Edward Berman, Ashwin Gopinath, Karthik Narasimhan,
+and Shunyu Yao.
+\newblock Reflexion: Language Agents with Verbal Reinforcement Learning.
+\newblock \emph{arXiv preprint arXiv:2303.11366}, 2023.
+\newblock \url{https://arxiv.org/abs/2303.11366}
+
+\bibitem{yao2023tot}
+Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Thomas L. Griffiths, Yuan Cao,
+and Karthik Narasimhan.
+\newblock Tree of Thoughts: Deliberate Problem Solving with Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2305.10601}, 2023.
+\newblock \url{https://arxiv.org/abs/2305.10601}
+
+\bibitem{wang2023voyager}
+Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu,
+Linxi Fan, and Anima Anandkumar.
+\newblock Voyager: An Open-Ended Embodied Agent with Large Language Models.
+\newblock \emph{arXiv preprint arXiv:2305.16291}, 2023.
+\newblock \url{https://arxiv.org/abs/2305.16291}
+
+\bibitem{bai2022constitutional}
+Yuntao Bai et al.
+\newblock Constitutional AI: Harmlessness from AI Feedback.
+\newblock \emph{arXiv preprint arXiv:2212.08073}, 2022.
+\newblock \url{https://arxiv.org/abs/2212.08073}
+
+\bibitem{edge2024graphrag}
+Darren Edge, Ha Trinh, Newman Cheng, Joshua Bradley, Alex Chao, Apurva Mody,
+Steven Truitt, Dasha Metropolitansky, Robert Osazuwa Ness, and Jonathan Larson.
+\newblock From Local to Global: A Graph RAG Approach to Query-Focused Summarization.
+\newblock \emph{arXiv preprint arXiv:2404.16130}, 2024.
+\newblock \url{https://arxiv.org/abs/2404.16130}
+
+\bibitem{yang2024sweagent}
+John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao,
+Karthik Narasimhan, and Ofir Press.
+\newblock SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering.
+\newblock \emph{arXiv preprint arXiv:2405.15793}, 2024.
+\newblock \url{https://arxiv.org/abs/2405.15793}
+
+\end{thebibliography}
+
+\end{document}

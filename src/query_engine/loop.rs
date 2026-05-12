@@ -278,7 +278,8 @@ impl QueryLoopEngine {
             }
 
             if let Some(content) = response.content {
-                messages.push(ChatMessage {
+                let tc = if response.tool_calls.is_empty() { None } else { Some(response.tool_calls.clone()) };
+                messages.push(ChatMessage { tool_call_id: None, tool_calls: tc,
                     role: "assistant".into(),
                     content,
                 });
@@ -312,7 +313,7 @@ impl QueryLoopEngine {
                     tool_name: call.name.clone(),
                     output: tool_output.clone(),
                 });
-                messages.push(ChatMessage {
+                messages.push(ChatMessage { tool_call_id: Some(call.id.clone()), tool_calls: None,
                     role: "tool".into(),
                     content: tool_output,
                 });

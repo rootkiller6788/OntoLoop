@@ -1322,11 +1322,11 @@ mod tests {
             supermemory: supermemory::SupermemoryKernel::default(),
         };
         let history = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: "We store anchors in StateStore for GraphRAG.".into(),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "assistant".into(),
                 content: "We store anchors in StateStore for GraphRAG.".into(),
             },

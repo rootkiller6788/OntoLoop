@@ -1,0 +1,30 @@
+{
+    "generated_at":  "2026-05-10T10:43:04",
+    "benchmark":  "benchmark_v1",
+    "total":  240,
+    "required_categories":  [
+                                "frontend_replica",
+                                "backend_feature",
+                                "bug_fix",
+                                "test_repair",
+                                "refactor",
+                                "deploy_script",
+                                "multi_tool_orchestration",
+                                "permission_reject"
+                            ],
+    "split_counts":  {
+                         "dev":  120,
+                         "heldout":  64,
+                         "stress":  56
+                     },
+    "category_counts":  {
+                            "frontend_replica":  30,
+                            "backend_feature":  30,
+                            "bug_fix":  30,
+                            "test_repair":  30,
+                            "refactor":  30,
+                            "deploy_script":  30,
+                            "multi_tool_orchestration":  30,
+                            "permission_reject":  30
+                        }
+}

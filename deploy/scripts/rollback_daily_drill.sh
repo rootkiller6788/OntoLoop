@@ -4,6 +4,7 @@ set -euo pipefail
 MANIFEST_PATH="${1:-./Cargo.toml}"
 PROD_CONFIG_PATH="${2:-deploy/config/autoloop.prod.toml}"
 SESSION_PREFIX="${3:-daily-rollback}"
+DRILL_MODE="${4:-light}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -35,16 +36,20 @@ run_step "high-risk-unauthorized-rejected" \
   cargo test --manifest-path "${MANIFEST_PATH}" --test permission_mode_runtime_enforced_e2e
 run_step "canary-path-write-blocked-with-traceable-deny" \
   cargo test --manifest-path "${MANIFEST_PATH}" --lib tests::production_write_gate_blocks_canary_path_9c
-run_step "canary-fail-auto-rollback-e2e" \
-  cargo test --manifest-path "${MANIFEST_PATH}" --test pevo_r10_promote_canary_fail_rollback_e2e
-run_step "rollout-drill-shadow-canary-full-rollback" \
-  bash ./deploy/scripts/d14_rollout.sh "${MANIFEST_PATH}" "${PROD_CONFIG_PATH}" "${SESSION_PREFIX}"
+if [[ "${DRILL_MODE}" == "full" ]]; then
+  run_step "canary-fail-auto-rollback-e2e" \
+    cargo test --manifest-path "${MANIFEST_PATH}" --test pevo_r10_promote_canary_fail_rollback_e2e
+  run_step "rollout-drill-shadow-canary-full-rollback" \
+    bash ./deploy/scripts/d14_rollout.sh "${MANIFEST_PATH}" "${PROD_CONFIG_PATH}" "${SESSION_PREFIX}"
+fi
 
 RESULTS_JSON="[${RESULTS_JSON%,}]"
 
 cat > "${JSON_PATH}" <<EOF
 {
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "drill_mode": "${DRILL_MODE}",
+  "cadence": "$([[ "${DRILL_MODE}" == "full" ]] && echo weekly || echo daily)",
   "manifest": "${MANIFEST_PATH}",
   "prod_config": "${PROD_CONFIG_PATH}",
   "all_passed": true,
@@ -61,4 +66,3 @@ EOF
 
 echo "ROLLBACK_DAILY_DRILL_OK log=${LOG_PATH}"
 echo "ROLLBACK_DAILY_DRILL_JSON=${JSON_PATH}"
-

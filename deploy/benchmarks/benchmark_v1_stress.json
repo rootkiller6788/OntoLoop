@@ -1,0 +1,562 @@
+[
+    {
+        "task_id":  "bv1-fe-024",
+        "mode":  "swarm",
+        "category":  "frontend_replica",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/frontend_replica/bv1-fe-024.html",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: frontend_replica\nSplit: stress\nTaskId: bv1-fe-024\nScenario: release gate report console\nGoal: Build a production-style frontend replica page for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/frontend_replica/bv1-fe-024.html\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-fe-025",
+        "mode":  "swarm",
+        "category":  "frontend_replica",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/frontend_replica/bv1-fe-025.html",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: frontend_replica\nSplit: stress\nTaskId: bv1-fe-025\nScenario: tenant permission matrix page\nGoal: Build a production-style frontend replica page for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/frontend_replica/bv1-fe-025.html\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-fe-026",
+        "mode":  "swarm",
+        "category":  "frontend_replica",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/frontend_replica/bv1-fe-026.html",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: frontend_replica\nSplit: stress\nTaskId: bv1-fe-026\nScenario: pipeline observability panel\nGoal: Build a production-style frontend replica page for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/frontend_replica/bv1-fe-026.html\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-fe-027",
+        "mode":  "swarm",
+        "category":  "frontend_replica",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/frontend_replica/bv1-fe-027.html",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: frontend_replica\nSplit: stress\nTaskId: bv1-fe-027\nScenario: rollback drill report page\nGoal: Build a production-style frontend replica page for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/frontend_replica/bv1-fe-027.html\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-fe-028",
+        "mode":  "swarm",
+        "category":  "frontend_replica",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/frontend_replica/bv1-fe-028.html",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: frontend_replica\nSplit: stress\nTaskId: bv1-fe-028\nScenario: artifact evidence explorer\nGoal: Build a production-style frontend replica page for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/frontend_replica/bv1-fe-028.html\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-fe-029",
+        "mode":  "swarm",
+        "category":  "frontend_replica",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/frontend_replica/bv1-fe-029.html",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: frontend_replica\nSplit: stress\nTaskId: bv1-fe-029\nScenario: multi-session command center\nGoal: Build a production-style frontend replica page for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/frontend_replica/bv1-fe-029.html\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-fe-030",
+        "mode":  "swarm",
+        "category":  "frontend_replica",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/frontend_replica/bv1-fe-030.html",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: frontend_replica\nSplit: stress\nTaskId: bv1-fe-030\nScenario: benchmark leaderboard\nGoal: Build a production-style frontend replica page for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/frontend_replica/bv1-fe-030.html\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-be-024",
+        "mode":  "swarm",
+        "category":  "backend_feature",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/backend_feature/bv1-be-024.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: backend_feature\nSplit: stress\nTaskId: bv1-be-024\nScenario: relation edge pagination\nGoal: Implement backend feature behavior spec with API contract notes for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/backend_feature/bv1-be-024.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-be-025",
+        "mode":  "swarm",
+        "category":  "backend_feature",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/backend_feature/bv1-be-025.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: backend_feature\nSplit: stress\nTaskId: bv1-be-025\nScenario: write proof hashing\nGoal: Implement backend feature behavior spec with API contract notes for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/backend_feature/bv1-be-025.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-be-026",
+        "mode":  "swarm",
+        "category":  "backend_feature",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/backend_feature/bv1-be-026.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: backend_feature\nSplit: stress\nTaskId: bv1-be-026\nScenario: query replay lookup\nGoal: Implement backend feature behavior spec with API contract notes for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/backend_feature/bv1-be-026.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-be-027",
+        "mode":  "swarm",
+        "category":  "backend_feature",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/backend_feature/bv1-be-027.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: backend_feature\nSplit: stress\nTaskId: bv1-be-027\nScenario: signal ingest batching\nGoal: Implement backend feature behavior spec with API contract notes for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/backend_feature/bv1-be-027.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-be-028",
+        "mode":  "swarm",
+        "category":  "backend_feature",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/backend_feature/bv1-be-028.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: backend_feature\nSplit: stress\nTaskId: bv1-be-028\nScenario: review gate transition\nGoal: Implement backend feature behavior spec with API contract notes for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/backend_feature/bv1-be-028.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-be-029",
+        "mode":  "swarm",
+        "category":  "backend_feature",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/backend_feature/bv1-be-029.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: backend_feature\nSplit: stress\nTaskId: bv1-be-029\nScenario: rollback marker persistence\nGoal: Implement backend feature behavior spec with API contract notes for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/backend_feature/bv1-be-029.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-be-030",
+        "mode":  "swarm",
+        "category":  "backend_feature",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/backend_feature/bv1-be-030.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: backend_feature\nSplit: stress\nTaskId: bv1-be-030\nScenario: budget preflight response\nGoal: Implement backend feature behavior spec with API contract notes for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/backend_feature/bv1-be-030.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-bug-024",
+        "mode":  "swarm",
+        "category":  "bug_fix",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/bug_fix/bv1-bug-024.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: bug_fix\nSplit: stress\nTaskId: bv1-bug-024\nScenario: stale relation snapshot\nGoal: Reproduce and fix a real bug, then summarize root cause and fix steps for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/bug_fix/bv1-bug-024.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-bug-025",
+        "mode":  "swarm",
+        "category":  "bug_fix",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/bug_fix/bv1-bug-025.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: bug_fix\nSplit: stress\nTaskId: bv1-bug-025\nScenario: timeout retry misclassification\nGoal: Reproduce and fix a real bug, then summarize root cause and fix steps for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/bug_fix/bv1-bug-025.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-bug-026",
+        "mode":  "swarm",
+        "category":  "bug_fix",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/bug_fix/bv1-bug-026.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: bug_fix\nSplit: stress\nTaskId: bv1-bug-026\nScenario: schema mismatch in query plane\nGoal: Reproduce and fix a real bug, then summarize root cause and fix steps for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/bug_fix/bv1-bug-026.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-bug-027",
+        "mode":  "swarm",
+        "category":  "bug_fix",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/bug_fix/bv1-bug-027.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: bug_fix\nSplit: stress\nTaskId: bv1-bug-027\nScenario: gate decision shadow drift\nGoal: Reproduce and fix a real bug, then summarize root cause and fix steps for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/bug_fix/bv1-bug-027.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-bug-028",
+        "mode":  "swarm",
+        "category":  "bug_fix",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/bug_fix/bv1-bug-028.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: bug_fix\nSplit: stress\nTaskId: bv1-bug-028\nScenario: wal append ordering issue\nGoal: Reproduce and fix a real bug, then summarize root cause and fix steps for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/bug_fix/bv1-bug-028.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-bug-029",
+        "mode":  "swarm",
+        "category":  "bug_fix",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/bug_fix/bv1-bug-029.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: bug_fix\nSplit: stress\nTaskId: bv1-bug-029\nScenario: invalid evidence hash parse\nGoal: Reproduce and fix a real bug, then summarize root cause and fix steps for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/bug_fix/bv1-bug-029.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-bug-030",
+        "mode":  "swarm",
+        "category":  "bug_fix",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/bug_fix/bv1-bug-030.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: bug_fix\nSplit: stress\nTaskId: bv1-bug-030\nScenario: tool event orphan chain\nGoal: Reproduce and fix a real bug, then summarize root cause and fix steps for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/bug_fix/bv1-bug-030.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-test-024",
+        "mode":  "swarm",
+        "category":  "test_repair",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/test_repair/bv1-test-024.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: test_repair\nSplit: stress\nTaskId: bv1-test-024\nScenario: non-deterministic replay fingerprint\nGoal: Repair failing tests and document verifier plan for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/test_repair/bv1-test-024.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-test-025",
+        "mode":  "swarm",
+        "category":  "test_repair",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/test_repair/bv1-test-025.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: test_repair\nSplit: stress\nTaskId: bv1-test-025\nScenario: unstable timeout threshold\nGoal: Repair failing tests and document verifier plan for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/test_repair/bv1-test-025.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-test-026",
+        "mode":  "swarm",
+        "category":  "test_repair",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/test_repair/bv1-test-026.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: test_repair\nSplit: stress\nTaskId: bv1-test-026\nScenario: bridge event ordering\nGoal: Repair failing tests and document verifier plan for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/test_repair/bv1-test-026.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-test-027",
+        "mode":  "swarm",
+        "category":  "test_repair",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/test_repair/bv1-test-027.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: test_repair\nSplit: stress\nTaskId: bv1-test-027\nScenario: shadow/full profile drift\nGoal: Repair failing tests and document verifier plan for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/test_repair/bv1-test-027.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-test-028",
+        "mode":  "swarm",
+        "category":  "test_repair",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/test_repair/bv1-test-028.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: test_repair\nSplit: stress\nTaskId: bv1-test-028\nScenario: waltx partial failure coverage\nGoal: Repair failing tests and document verifier plan for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/test_repair/bv1-test-028.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-test-029",
+        "mode":  "swarm",
+        "category":  "test_repair",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/test_repair/bv1-test-029.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: test_repair\nSplit: stress\nTaskId: bv1-test-029\nScenario: no-bypass scanner false pass\nGoal: Repair failing tests and document verifier plan for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/test_repair/bv1-test-029.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-test-030",
+        "mode":  "swarm",
+        "category":  "test_repair",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/test_repair/bv1-test-030.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: test_repair\nSplit: stress\nTaskId: bv1-test-030\nScenario: permission callback race\nGoal: Repair failing tests and document verifier plan for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/test_repair/bv1-test-030.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-ref-024",
+        "mode":  "swarm",
+        "category":  "refactor",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/refactor/bv1-ref-024.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: refactor\nSplit: stress\nTaskId: bv1-ref-024\nScenario: relation facade extraction\nGoal: Perform safe refactor plan with behavior-preserving checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/refactor/bv1-ref-024.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-ref-025",
+        "mode":  "swarm",
+        "category":  "refactor",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/refactor/bv1-ref-025.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: refactor\nSplit: stress\nTaskId: bv1-ref-025\nScenario: evidence writer simplification\nGoal: Perform safe refactor plan with behavior-preserving checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/refactor/bv1-ref-025.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-ref-026",
+        "mode":  "swarm",
+        "category":  "refactor",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/refactor/bv1-ref-026.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: refactor\nSplit: stress\nTaskId: bv1-ref-026\nScenario: session runtime boundary\nGoal: Perform safe refactor plan with behavior-preserving checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/refactor/bv1-ref-026.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-ref-027",
+        "mode":  "swarm",
+        "category":  "refactor",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/refactor/bv1-ref-027.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: refactor\nSplit: stress\nTaskId: bv1-ref-027\nScenario: tool adapter unification\nGoal: Perform safe refactor plan with behavior-preserving checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/refactor/bv1-ref-027.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-ref-028",
+        "mode":  "swarm",
+        "category":  "refactor",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/refactor/bv1-ref-028.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: refactor\nSplit: stress\nTaskId: bv1-ref-028\nScenario: state transition reducer\nGoal: Perform safe refactor plan with behavior-preserving checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/refactor/bv1-ref-028.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-ref-029",
+        "mode":  "swarm",
+        "category":  "refactor",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/refactor/bv1-ref-029.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: refactor\nSplit: stress\nTaskId: bv1-ref-029\nScenario: signal pipeline segmentation\nGoal: Perform safe refactor plan with behavior-preserving checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/refactor/bv1-ref-029.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-ref-030",
+        "mode":  "swarm",
+        "category":  "refactor",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/refactor/bv1-ref-030.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: refactor\nSplit: stress\nTaskId: bv1-ref-030\nScenario: benchmark reporter isolation\nGoal: Perform safe refactor plan with behavior-preserving checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/refactor/bv1-ref-030.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-dep-024",
+        "mode":  "swarm",
+        "category":  "deploy_script",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/deploy_script/bv1-dep-024.sh",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: deploy_script\nSplit: stress\nTaskId: bv1-dep-024\nScenario: soak monitor runner\nGoal: Create deployment or rollback script with safety checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/deploy_script/bv1-dep-024.sh\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-dep-025",
+        "mode":  "swarm",
+        "category":  "deploy_script",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/deploy_script/bv1-dep-025.sh",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: deploy_script\nSplit: stress\nTaskId: bv1-dep-025\nScenario: fault injection daily drill\nGoal: Create deployment or rollback script with safety checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/deploy_script/bv1-dep-025.sh\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-dep-026",
+        "mode":  "swarm",
+        "category":  "deploy_script",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/deploy_script/bv1-dep-026.sh",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: deploy_script\nSplit: stress\nTaskId: bv1-dep-026\nScenario: config doctor preflight\nGoal: Create deployment or rollback script with safety checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/deploy_script/bv1-dep-026.sh\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-dep-027",
+        "mode":  "swarm",
+        "category":  "deploy_script",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/deploy_script/bv1-dep-027.sh",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: deploy_script\nSplit: stress\nTaskId: bv1-dep-027\nScenario: postgres schema isolate\nGoal: Create deployment or rollback script with safety checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/deploy_script/bv1-dep-027.sh\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-dep-028",
+        "mode":  "swarm",
+        "category":  "deploy_script",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/deploy_script/bv1-dep-028.sh",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: deploy_script\nSplit: stress\nTaskId: bv1-dep-028\nScenario: runtime retention cleanup\nGoal: Create deployment or rollback script with safety checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/deploy_script/bv1-dep-028.sh\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-dep-029",
+        "mode":  "swarm",
+        "category":  "deploy_script",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/deploy_script/bv1-dep-029.sh",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: deploy_script\nSplit: stress\nTaskId: bv1-dep-029\nScenario: evidence pack export\nGoal: Create deployment or rollback script with safety checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/deploy_script/bv1-dep-029.sh\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-dep-030",
+        "mode":  "swarm",
+        "category":  "deploy_script",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/deploy_script/bv1-dep-030.sh",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: deploy_script\nSplit: stress\nTaskId: bv1-dep-030\nScenario: release summary publisher\nGoal: Create deployment or rollback script with safety checks for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/deploy_script/bv1-dep-030.sh\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-mto-024",
+        "mode":  "swarm",
+        "category":  "multi_tool_orchestration",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-024.json",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: multi_tool_orchestration\nSplit: stress\nTaskId: bv1-mto-024\nScenario: frontend-\u003eartifact-\u003eevidence close loop\nGoal: Run multi-tool orchestration and provide execution graph for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-024.json\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-mto-025",
+        "mode":  "swarm",
+        "category":  "multi_tool_orchestration",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-025.json",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: multi_tool_orchestration\nSplit: stress\nTaskId: bv1-mto-025\nScenario: dual-lane plan/execute split\nGoal: Run multi-tool orchestration and provide execution graph for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-025.json\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-mto-026",
+        "mode":  "swarm",
+        "category":  "multi_tool_orchestration",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-026.json",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: multi_tool_orchestration\nSplit: stress\nTaskId: bv1-mto-026\nScenario: parallel verifier and report\nGoal: Run multi-tool orchestration and provide execution graph for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-026.json\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-mto-027",
+        "mode":  "swarm",
+        "category":  "multi_tool_orchestration",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-027.json",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: multi_tool_orchestration\nSplit: stress\nTaskId: bv1-mto-027\nScenario: shadow compare and explain\nGoal: Run multi-tool orchestration and provide execution graph for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-027.json\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-mto-028",
+        "mode":  "swarm",
+        "category":  "multi_tool_orchestration",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-028.json",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: multi_tool_orchestration\nSplit: stress\nTaskId: bv1-mto-028\nScenario: batch signal ingest and drain\nGoal: Run multi-tool orchestration and provide execution graph for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-028.json\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-mto-029",
+        "mode":  "swarm",
+        "category":  "multi_tool_orchestration",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-029.json",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: multi_tool_orchestration\nSplit: stress\nTaskId: bv1-mto-029\nScenario: recovery drill orchestration\nGoal: Run multi-tool orchestration and provide execution graph for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-029.json\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-mto-030",
+        "mode":  "swarm",
+        "category":  "multi_tool_orchestration",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-030.json",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: multi_tool_orchestration\nSplit: stress\nTaskId: bv1-mto-030\nScenario: cross-session resume pipeline\nGoal: Run multi-tool orchestration and provide execution graph for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/multi_tool_orchestration/bv1-mto-030.json\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-perm-024",
+        "mode":  "swarm",
+        "category":  "permission_reject",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/permission_reject/bv1-perm-024.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: permission_reject\nSplit: stress\nTaskId: bv1-perm-024\nScenario: expired session lease action\nGoal: Execute permission-sensitive flow and prove correct reject/allow decision for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/permission_reject/bv1-perm-024.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-perm-025",
+        "mode":  "swarm",
+        "category":  "permission_reject",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/permission_reject/bv1-perm-025.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: permission_reject\nSplit: stress\nTaskId: bv1-perm-025\nScenario: high-risk without approval\nGoal: Execute permission-sensitive flow and prove correct reject/allow decision for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/permission_reject/bv1-perm-025.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-perm-026",
+        "mode":  "swarm",
+        "category":  "permission_reject",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/permission_reject/bv1-perm-026.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: permission_reject\nSplit: stress\nTaskId: bv1-perm-026\nScenario: fallback write in full mode\nGoal: Execute permission-sensitive flow and prove correct reject/allow decision for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/permission_reject/bv1-perm-026.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-perm-027",
+        "mode":  "swarm",
+        "category":  "permission_reject",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/permission_reject/bv1-perm-027.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: permission_reject\nSplit: stress\nTaskId: bv1-perm-027\nScenario: cross-tenant read attempt\nGoal: Execute permission-sensitive flow and prove correct reject/allow decision for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/permission_reject/bv1-perm-027.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-perm-028",
+        "mode":  "swarm",
+        "category":  "permission_reject",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/permission_reject/bv1-perm-028.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: permission_reject\nSplit: stress\nTaskId: bv1-perm-028\nScenario: tool scope overreach\nGoal: Execute permission-sensitive flow and prove correct reject/allow decision for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/permission_reject/bv1-perm-028.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-perm-029",
+        "mode":  "swarm",
+        "category":  "permission_reject",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/permission_reject/bv1-perm-029.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: permission_reject\nSplit: stress\nTaskId: bv1-perm-029\nScenario: bypass static scan violation\nGoal: Execute permission-sensitive flow and prove correct reject/allow decision for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/permission_reject/bv1-perm-029.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    },
+    {
+        "task_id":  "bv1-perm-030",
+        "mode":  "swarm",
+        "category":  "permission_reject",
+        "split":  "stress",
+        "target_artifact_path":  "output/benchmark_v1/stress/permission_reject/bv1-perm-030.md",
+        "auto_verifier":  "artifact_exists_nonempty_sha256_evidence_relation",
+        "success_definition":  "artifact_written_and_verified_with_write_proof_hash_evidence_ref_and_relation_trace",
+        "prompt":  "[BenchmarkV1]\nCategory: permission_reject\nSplit: stress\nTaskId: bv1-perm-030\nScenario: rollback window expired\nGoal: Execute permission-sensitive flow and prove correct reject/allow decision for this scenario.\nMust write the final artifact to path: output/benchmark_v1/stress/permission_reject/bv1-perm-030.md\nHard contract: artifact_delivery/v1 requires_artifact artifact contract.\nVerifier requirements: file exists, non-empty, sha256 present, evidence_ref present, relation trace present.\nOutput style: first complete the file write using tools, then return a concise summary with assumptions."
+    }
+]

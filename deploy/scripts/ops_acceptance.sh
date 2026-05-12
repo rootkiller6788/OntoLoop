@@ -50,8 +50,31 @@ ALERT_DRILL_OUT="$(run_system_json_step "ops-alert-drill" "${SESSION_PREFIX}-ale
 SELF_HEAL_OUT="$(run_system_json_step "ops-self-heal-drill" "${SESSION_PREFIX}-heal" self-heal drill --profile queue_throttle --reason "ops drill self-heal")"
 
 DOCTOR_STATUS="$(python -c "import json;print(json.load(open('${CONFIG_DOCTOR_OUT}','r',encoding='utf-8')).get('status',''))")"
-if [[ "${DOCTOR_STATUS}" == "fail" ]]; then
-  echo "config doctor failed" >&2
+if [[ "${DOCTOR_STATUS}" != "pass" ]]; then
+  echo "config doctor hard gate failed: status=${DOCTOR_STATUS}" >&2
+  exit 1
+fi
+
+python - <<PY
+import json
+from pathlib import Path
+doctor = json.loads(Path(r"${CONFIG_DOCTOR_OUT}").read_text(encoding="utf-8"))
+required = {
+    "profile.alignment",
+    "runtime.gate_mode",
+    "runtime.rollback_window",
+    "storage.backend_consistency",
+}
+checks = {item.get("id"): item for item in doctor.get("checks", []) if isinstance(item, dict)}
+missing = [item for item in required if item not in checks]
+if missing:
+    raise SystemExit(f"config doctor hard gate missing required checks: {missing}")
+failed = [item for item in required if not bool(checks[item].get("passed", False))]
+if failed:
+    raise SystemExit(f"config doctor hard gate checks failed: {failed}")
+PY
+if [[ $? -ne 0 ]]; then
+  echo "config doctor required checks validation failed" >&2
   exit 1
 fi
 

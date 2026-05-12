@@ -105,9 +105,14 @@ fn day10_trigger_wake_report_surface_end_to_end() {
         app.state_store()
             .create_schedule_event(
                 session.to_string(),
-                "trigger:day10".to_string(),
+                "trigger:sync:day10".to_string(),
                 "focus-trigger".to_string(),
-                "Run day10 trigger acceptance".to_string(),
+                serde_json::json!({
+                    "mode": "incremental",
+                    "dry_run": true,
+                    "targets": ["memory"]
+                })
+                .to_string(),
                 "day10-trigger-test".to_string(),
             )
             .await

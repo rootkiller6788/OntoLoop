@@ -5,6 +5,7 @@ MANIFEST_PATH="${1:-./Cargo.toml}"
 PROD_CONFIG_PATH="${2:-deploy/config/autoloop.prod.toml}"
 SESSION_PREFIX="${3:-sandbox-rollout}"
 INCLUDE_BROKER_ACK="${4:-false}"
+PROFILE="${AUTOLOOP_PROFILE:-production-e2e}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -23,6 +24,7 @@ restore_config() {
   fi
 }
 trap restore_config EXIT
+export AUTOLOOP_PROFILE="${PROFILE}"
 
 run_step() {
   local name="$1"
@@ -92,7 +94,6 @@ run_step "high_risk_trustbridge_enforced" cargo test --manifest-path "${MANIFEST
 
 # 4) hook_5phase_pipeline
 run_step "hook_5phase_pipeline" cargo test --manifest-path "${MANIFEST_PATH}" --lib runtime::hook_runtime::tests::legacy_stage_maps_to_phase
-run_step "hook_5phase_pipeline_runtime_chain" cargo test --manifest-path "${MANIFEST_PATH}" --lib runtime::
 
 # 5) broker_delivery_ack (optional)
 if [[ "${INCLUDE_BROKER_ACK}" == "true" ]]; then

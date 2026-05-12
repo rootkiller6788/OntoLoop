@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs,
     io::{self, Write},
@@ -35,8 +35,9 @@ use tracing_subscriber::EnvFilter;
 mod command_dispatch;
 
 #[derive(Parser, Debug)]
-#[command(name = "autocog")]
-#[command(about = "AutoCog-style CLI for OntoLoop autonomous cognition")]
+#[command(name = "ontoloop")]
+#[command(about = "OntoLoop — sovereign AI harness. Plan | Lite | Full | Test")]
+#[command(version = "0.1.0")]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
@@ -333,6 +334,10 @@ enum Commands {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
+    Tui {
+        #[arg(long)]
+        mode: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -373,9 +378,16 @@ async fn run_main() -> Result<()> {
     let identity_policy = cli.policy.clone();
     let identity_lease_ttl_ms = cli.lease_ttl_ms;
     let permission_mode_override = cli.permission_mode.clone();
-    let config = AppConfig::load_with_profile_hint(cli.config.as_deref(), cli.profile.as_deref())?;
+    let config = match AppConfig::load_with_profile_hint(cli.config.as_deref(), cli.profile.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            eprintln!("[ontoloop] Config not found, using defaults (set OPENAI_API_KEY env var)");
+            AppConfig::default()
+        }
+    };
     let mut config = config;
-    apply_provider_env_overrides(&mut config);
+    let tui_config = config.clone();
+apply_provider_env_overrides(&mut config);
 
     if let Some(mode) = permission_mode_override.as_deref() {
         unsafe {
@@ -1373,6 +1385,14 @@ async fn run_main() -> Result<()> {
                 )
                 .await?;
             }
+        Commands::Tui { mode } => {
+            if let Some(m) = &mode {
+                println!("Starting OntoLoop TUI in {} mode...", m);
+            } else {
+                println!("Starting OntoLoop TUI (Lite mode)...");
+            }
+            autoloop::tui::run_tui(tui_config.clone()).await?;
+        }
         }
     } else if let Some(message) = cli.message {
         bind_identity_for_session(
@@ -1392,15 +1412,8 @@ async fn run_main() -> Result<()> {
         };
         println!("{response}");
     } else {
-        println!(
-            "OntoLoop bootstrap ready: app={}, providers={}, tools={}, hooks={}, memory_targets={}, rag_strategies={}",
-            report.app_name,
-            report.provider_count,
-            report.tool_count,
-            report.hook_count,
-            report.memory_targets,
-            report.rag_strategies
-        );
+        // Default: launch TUI
+        autoloop::tui::run_tui(tui_config.clone()).await?;
     }
 
     Ok(())
@@ -1420,7 +1433,8 @@ async fn run_smoke_frontend_task(task: &str) -> Result<()> {
     let config =
         AppConfig::load_with_profile_hint(smoke_config_path.as_deref(), smoke_profile.as_deref())?;
     let mut config = config;
-    apply_provider_env_overrides(&mut config);
+    let tui_config = config.clone();
+apply_provider_env_overrides(&mut config);
     let app = Arc::new(AutoLoopApp::try_new(config)?);
     let session_id = "smoke:frontend";
     let trace_id = format!(
@@ -1483,6 +1497,7 @@ async fn run_smoke_frontend_task(task: &str) -> Result<()> {
 fn apply_provider_env_overrides(config: &mut AppConfig) {
     let api_base = std::env::var("AUTOLOOP_API_BASE")
         .ok()
+        .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
         .or_else(|| std::env::var("AUTOLOOP_SMOKE_API_BASE").ok());
     if let Some(api_base) = api_base {
         if !api_base.trim().is_empty() {

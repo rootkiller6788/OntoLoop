@@ -26,24 +26,41 @@ try {
     param(
       [string]$Name,
       [string]$Exe,
-      [string[]]$Argv
+      [string[]]$Argv,
+      [int]$RetryCount = 0
     )
 
     $display = "$Exe $($Argv -join ' ')"
     Add-Content -Path $logPath -Value ("`n==== RUN: [" + $Name + "] " + $display + " ====")
 
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $output = & $Exe @Argv 2>&1
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $prev
+    $attempt = 0
+    $maxAttempts = [Math]::Max(1, $RetryCount + 1)
+    while ($attempt -lt $maxAttempts) {
+      $attempt++
+      $prev = $ErrorActionPreference
+      $ErrorActionPreference = "Continue"
+      $output = & $Exe @Argv 2>&1
+      $exitCode = $LASTEXITCODE
+      $ErrorActionPreference = $prev
 
-    if ($null -ne $output) {
-      $output | Out-File -FilePath $logPath -Append -Encoding utf8
+      if ($null -ne $output) {
+        $output | Out-File -FilePath $logPath -Append -Encoding utf8
+      }
+      if ($exitCode -eq 0) {
+        break
+      }
+      $combinedOutput = if ($null -eq $output) { "" } else { ($output | Out-String) }
+      $isTransientBuildLockFailure = $combinedOutput -match "(?i)(failed to remove file .*ontoloop\.exe|拒绝访问|access is denied|os error 5|blocking waiting for file lock)"
+      if ($attempt -lt $maxAttempts -and $isTransientBuildLockFailure) {
+        Add-Content -Path $logPath -Value ("retrying [" + $Name + "] attempt " + ($attempt + 1) + "/" + $maxAttempts + " after exit=" + $exitCode + " (reason=transient_build_lock)")
+        Start-Sleep -Seconds 2
+      } else {
+        break
+      }
     }
 
     if ($exitCode -ne 0) {
-      throw "Command failed ($exitCode): [$Name] $display"
+      throw "Command failed ($exitCode): [$Name] $display (attempts=$maxAttempts)"
     }
 
     return [pscustomobject]@{
@@ -83,11 +100,11 @@ try {
   }
 
   $results = @()
-  $results += Invoke-Step -Name "cargo-check" -Exe "cargo" -Argv @("check", "--workspace", "--manifest-path", $ManifestPath)
-  $results += Invoke-Step -Name "unit-router-matrix" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_router_matrix")
-  $results += Invoke-Step -Name "unit-builder-template" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_builder_template")
-  $results += Invoke-Step -Name "unit-validator-pipeline" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_validator_pipeline")
-  $results += Invoke-Step -Name "e2e-foundry-pipeline-shadow" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_end_to_end")
+  $results += Invoke-Step -Name "cargo-check" -Exe "cargo" -Argv @("check", "--workspace", "--manifest-path", $ManifestPath) -RetryCount 1
+  $results += Invoke-Step -Name "unit-router-matrix" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_router_matrix") -RetryCount 1
+  $results += Invoke-Step -Name "unit-builder-template" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_builder_template") -RetryCount 1
+  $results += Invoke-Step -Name "unit-validator-pipeline" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_validator_pipeline") -RetryCount 1
+  $results += Invoke-Step -Name "e2e-foundry-pipeline-shadow" -Exe "cargo" -Argv @("test", "--manifest-path", $ManifestPath, "--test", "pq11_skill_foundry_end_to_end") -RetryCount 1
 
   Set-LocalStorageEndpoints
 
@@ -101,13 +118,13 @@ try {
 
   foreach ($stage in $stages) {
     Set-GateConfig -Mode $stage.mode -Ratio $stage.ratio
-    $results += Invoke-Step -Name ("rollout-" + $stage.name + "-status") -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "system", "status")
-    $results += Invoke-Step -Name ("rollout-" + $stage.name + "-health") -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "--session", $stage.session, "system", "health")
+    $results += Invoke-Step -Name ("rollout-" + $stage.name + "-status") -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "system", "status") -RetryCount 1
+    $results += Invoke-Step -Name ("rollout-" + $stage.name + "-health") -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "--session", $stage.session, "system", "health") -RetryCount 1
   }
 
   Set-GateConfig -Mode "shadow" -Ratio 0.2
-  $results += Invoke-Step -Name "rollback-status" -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "system", "status")
-  $results += Invoke-Step -Name "rollback-health" -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "--session", ($SessionPrefix + "-rollback"), "system", "health")
+  $results += Invoke-Step -Name "rollback-status" -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "system", "status") -RetryCount 1
+  $results += Invoke-Step -Name "rollback-health" -Exe "cargo" -Argv @("run", "--manifest-path", $ManifestPath, "--", "--config", $ProdConfigPath, "--session", ($SessionPrefix + "-rollback"), "system", "health") -RetryCount 1
 
   $summary = [pscustomobject]@{
     generated_at = (Get-Date).ToString("s")

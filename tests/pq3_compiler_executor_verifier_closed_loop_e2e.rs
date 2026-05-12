@@ -5,7 +5,13 @@ use autoloop_state_adapter::PermissionAction;
 
 #[tokio::test]
 async fn pq3_compiler_executor_verifier_closed_loop_decisions_have_evidence_and_queue_followups() {
-    let app = AutoLoopApp::new(AppConfig::default());
+    let mut config = AppConfig::default();
+    config.storage.backend = autoloop::config::StorageBackend::Postgres;
+    config.storage.postgres.enabled = true;
+    config.storage.postgres.uri = std::env::var("ONTOLOOP_TEST_POSTGRES_URI")
+        .unwrap_or_else(|_| "postgres://postgres:123456@localhost:5432/postgres".to_string());
+    config.storage.shadow_read_preference = "postgres".to_string();
+    let app = AutoLoopApp::new(config);
     let session_id = "pq3-closed-loop";
 
     app.state_store()

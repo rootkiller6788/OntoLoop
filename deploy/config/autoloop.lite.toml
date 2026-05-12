@@ -1,0 +1,144 @@
+[app]
+name = "ontoloop-lite"
+workspace_root = "."
+
+[agent]
+max_iterations = 20
+memory_window = 30
+system_prompt = "You are OntoLoop Lite. Use tools (read_file, write_file) to modify code. Always verify changes with the shell tool."
+
+[runtime]
+max_parallel_agents = 1
+max_memory_mb = 256
+default_budget_micros = 100_000_000
+quota_window_ms = 3600000
+quota_window_budget_micros = 100_000_000
+mcp_enabled = true
+allow_network_tools = true
+tool_breaker_failure_threshold = 3
+tool_breaker_cooldown_ms = 120000
+mcp_breaker_failure_threshold = 2
+mcp_breaker_cooldown_ms = 180000
+gate_mode = "shadow"
+gate_enforce_ratio = 0.0
+wasm_module_root = "rule/wasm-modules"
+rollback_contract_version = "v1"
+attestation_required = false
+trust_evidence_ledger_path = "deploy/runtime/trust/evidence.log"
+trust_budget_ledger_path = "deploy/runtime/trust/budget.log"
+trust_ledger_consistency_mode = "best_effort"
+
+[security]
+profile = "minimal-ironclaw"
+require_approval_for_exec = true
+ironclaw_compatible_rules = true
+
+[memory]
+load_identity = true
+load_memory_md = true
+load_history_md = true
+
+[learning]
+enabled = false
+sidecar_enabled = false
+index_kind = "flat"
+embedding_dimensions = 128
+top_k = 4
+gray_routing_ratio = 0.0
+routing_takeover_threshold = 0.0
+hot_window_days = 0
+cold_quantization = "scalar"
+
+[research]
+enabled = false
+backend = "auto"
+live_fetch_enabled = false
+max_queries_per_anchor = 1
+max_candidates_per_query = 1
+prefer_official_sources = false
+prefer_dynamic_render = false
+browser_render_url = ""
+browser_session_pool = []
+proxy_provider_name = ""
+proxy_pool = []
+anti_bot_profile = "none"
+rotate_proxy_per_request = false
+proxy_request_quota_per_proxy = 1
+proxy_breaker_failure_threshold = 1
+proxy_breaker_cooldown_ms = 60000
+playwright_node_binary = "node"
+playwright_launch_timeout_secs = 10
+firecrawl_api_url = ""
+firecrawl_api_key_env = ""
+self_hosted_scraper_url = ""
+request_timeout_secs = 10
+retry_attempts = 0
+stability_backoff_ms = 100
+user_agent = "ontoloop-lite/0.1"
+
+[rag]
+enable_graph_rag = true
+enable_first_principles_extraction = true
+
+[providers]
+builtin = ["openai-compatible"]
+default_model = "deepseek-chat"
+screening_model = "deepseek-chat"
+reasoning_model = "deepseek-chat"
+judge_model = "deepseek-chat"
+enable_tiered_routing = false
+prompt_cache_capacity = 128
+api_base_url = "https://api.deepseek.com/v1"
+api_key_env = "OPENAI_API_KEY"
+request_timeout_secs = 60
+mcp_servers = []
+
+[tools]
+builtin = ["read_file", "write_file"]
+allow_shell = true
+mcp_servers = []
+
+[hooks]
+builtin = ["self-learn"]
+learning_hooks_enabled = true
+
+[observability]
+enabled = true
+route_analytics_enabled = true
+failure_forensics_enabled = true
+dashboard_enabled = false
+report_top_k = 4
+
+[observability.alert_thresholds]
+p95_latency_ms = 120000
+error_rate = 0.05
+mttr_ms = 60000
+open_circuit_count = 1
+
+[deployment]
+profile = "lite"
+enable_container_assets = false
+config_dir = "deploy/config"
+backup_dir = "deploy/backup"
+
+[storage]
+backend = "postgres"
+mode = "direct"
+shadow_read_preference = "postgres"
+shadow_read_rollout_percent = 100
+shadow_write_grace_hours = 0
+
+[storage.postgres]
+enabled = true
+uri = "postgres://postgres:123456@localhost:5432/postgres"
+pool_size = 4
+schema = "public"
+app_name = "ontoloop-lite"
+
+[state_store]
+enabled = true
+backend = "in_memory"
+uri = "http://localhost:3000"
+module_name = "autoloop_core"
+namespace = "autoloop"
+pool_size = 4

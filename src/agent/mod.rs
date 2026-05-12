@@ -164,7 +164,7 @@ impl AgentRuntime {
         ));
         let system_prompt = format!("{system_prompt}{adaptive_guidance}");
 
-        messages.push(ChatMessage {
+        messages.push(ChatMessage { tool_call_id: None, tool_calls: None,
             role: "system".into(),
             content: system_prompt,
         });
@@ -922,11 +922,11 @@ impl AgentRuntime {
             "Generate file content for target path `{target_path}`.\n{format_hint}\nOriginal request:\n{request}"
         );
         let messages = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".to_string(),
                 content: "You generate file bodies only. No explanations.".to_string(),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".to_string(),
                 content: prompt,
             },
@@ -1220,25 +1220,12 @@ fn infer_artifact_delivery_contract(
 
 fn looks_like_artifact_task(content: &str) -> bool {
     let lowered = content.to_ascii_lowercase();
-    [
-        "write",
-        "save",
-        "create",
-        "generate",
-        "clone",
-        "git",
-        "github",
-        "deploy",
-        "build",
-        "render",
-        "export",
-        "output",
-        "artifact",
-        "file",
-        "html",
-    ]
-    .iter()
-    .any(|hint| lowered.contains(hint))
+    // only trigger on explicit artifact delivery markers, not generic file writes
+    lowered.contains("artifact_delivery/v1")
+        || lowered.contains("target_path")
+        || lowered.contains("artifact_delivery")
+        || (lowered.contains("```html") && lowered.contains("deploy"))
+        || (lowered.contains("build") && lowered.contains("render"))
 }
 
 fn extract_candidate_artifact_path(content: &str) -> Option<String> {

@@ -38,10 +38,11 @@ async fn d12_atomic_state_event_evidence_are_transactional() -> Result<()> {
         pool_size: 4,
         auto_migrate: true,
     });
-    if let Err(error) = db.ensure_ready().await {
-        eprintln!("skip d12_atomic_state_event_evidence_are_transactional: {error}");
-        return Ok(());
-    }
+    db.ensure_ready().await.map_err(|error| {
+        anyhow::anyhow!(
+            "production-e2e hard gate: postgres mirror not ready for d12_atomic_state_event_evidence_are_transactional: {error}"
+        )
+    })?;
 
     let session_id = "d12-session";
     let trace_id = "d12-trace";
@@ -122,10 +123,11 @@ async fn d12_shadow_dualwrite_diff_and_replay_view_visible() -> Result<()> {
         pool_size: 4,
         auto_migrate: true,
     });
-    if let Err(error) = postgres.ensure_ready().await {
-        eprintln!("skip d12_shadow_dualwrite_diff_and_replay_view_visible: {error}");
-        return Ok(());
-    }
+    postgres.ensure_ready().await.map_err(|error| {
+        anyhow::anyhow!(
+            "production-e2e hard gate: postgres mirror not ready for d12_shadow_dualwrite_diff_and_replay_view_visible: {error}"
+        )
+    })?;
 
     let store = StateStore::from_config(&StateStoreConfig {
         enabled: true,

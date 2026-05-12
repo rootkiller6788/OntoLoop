@@ -7,6 +7,8 @@ This folder is the technical deep-dive companion to the repository homepage.
 - Understand neutral process design and naming: [PROCESS_MODEL.md](PROCESS_MODEL.md)
 - Use unified P1-P13 phase protocol + AI output contract: [P1_P13_UNIFIED_PROTOCOL.md](P1_P13_UNIFIED_PROTOCOL.md)
 - Read frozen interface contract policy: [RFC_CONTRACTS_V1.md](RFC_CONTRACTS_V1.md)
+- Read production hard gates (non-relaxable): [production_contract.md](production_contract.md)
+- Read layered acceptance contract (L0-L4): [ACCEPTANCE_LAYERS_V1.md](ACCEPTANCE_LAYERS_V1.md)
 - Run gray rollout operations: [ROLLOUT_RUNBOOK.md](ROLLOUT_RUNBOOK.md)
 - Run Day10 E2E acceptance and collect command-level evidence: [DAY10_E2E_ACCEPTANCE.md](DAY10_E2E_ACCEPTANCE.md)
 - Understand architecture and module boundaries: [../ARCHITECTURE.md](../ARCHITECTURE.md)

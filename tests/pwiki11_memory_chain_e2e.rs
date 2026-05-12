@@ -31,8 +31,33 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+struct ProfileGuard(Option<String>);
+
+impl Drop for ProfileGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.0.take() {
+            unsafe {
+                std::env::set_var("AUTOLOOP_PROFILE", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("AUTOLOOP_PROFILE");
+            }
+        }
+    }
+}
+
+fn force_integration_profile() -> ProfileGuard {
+    let previous = std::env::var("AUTOLOOP_PROFILE").ok();
+    unsafe {
+        std::env::set_var("AUTOLOOP_PROFILE", "integration");
+    }
+    ProfileGuard(previous)
+}
+
 #[tokio::test]
 async fn pwiki11_end_to_end_compile_infer_health_recall_heal_recompile_query() {
+    let _profile_guard = force_integration_profile();
     let db = in_memory_db();
     let kernel = GitmemoryCoreKernel::new();
     let session_id = "pwiki11-e2e";
@@ -182,6 +207,7 @@ async fn pwiki11_end_to_end_compile_infer_health_recall_heal_recompile_query() {
 
 #[tokio::test]
 async fn pwiki11_heal_proposal_requires_approval_before_write_and_supports_replay_after_approval() {
+    let _profile_guard = force_integration_profile();
     let db = in_memory_db();
     let kernel = GitmemoryCoreKernel::new();
     let session_id = "pwiki11-approval-gate";

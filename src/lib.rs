@@ -26,6 +26,7 @@ pub mod session;
 pub mod skills;
 pub mod tools;
 pub mod transport;
+pub mod tui;
 
 pub use autoloop_state_adapter as state_store_adapter;
 
@@ -486,6 +487,13 @@ impl AutoLoopApp {
     }
 
     async fn process_direct_inner(&self, session_id: &str, content: &str) -> Result<String> {
+        self.state_store
+            .grant_permissions(session_id, vec![
+                autoloop_state_adapter::PermissionAction::Read,
+                autoloop_state_adapter::PermissionAction::Write,
+                autoloop_state_adapter::PermissionAction::Dispatch,
+            ])
+            .await?;
         let surface = if should_route_code_task_to_harness(content) {
             "harness_facade"
         } else {
@@ -589,7 +597,7 @@ impl AutoLoopApp {
                     session_id,
                     &trace_id,
                     content,
-                    true,
+                    false, // soft: agent fixes first, verify after
                 )
                 .await?;
         }

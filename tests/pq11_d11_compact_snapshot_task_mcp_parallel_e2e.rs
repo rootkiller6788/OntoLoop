@@ -2,42 +2,57 @@ use autoloop::{AutoLoopApp, config::AppConfig};
 use autoloop::contracts::services::{
     SERVICE_GATE_TOKEN_FIELD, ServiceDomain, build_service_gate_token,
 };
+use autoloop::contracts::ids::{SessionId, TraceId};
 
 #[tokio::test]
 async fn d11_parallel_compact_snapshot_task_mcp_acceptance_e2e() {
-    let app = AutoLoopApp::new(AppConfig::default());
-    let session_id = "pq11-d11-acceptance";
+    let mut config = AppConfig::default();
+    config.storage.backend = autoloop::config::StorageBackend::Postgres;
+    config.storage.postgres.enabled = true;
+    config.storage.postgres.uri = std::env::var("ONTOLOOP_TEST_POSTGRES_URI")
+        .unwrap_or_else(|_| "postgres://postgres:123456@localhost:5432/postgres".to_string());
+    config.storage.shadow_read_preference = "postgres".to_string();
+    let app = AutoLoopApp::new(config);
+    let run_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_millis();
+    let session_id = format!("pq11-d11-acceptance-{run_suffix}");
+    let session_id_wrapped = SessionId(session_id.clone());
+    let tenant_id = format!("tenant:pq11:{run_suffix}");
+    let principal_id = format!("principal:pq11:{run_suffix}");
+    let policy_id = format!("policy:pq11:{run_suffix}");
 
     app.ensure_session_identity(
-        session_id,
-        "tenant:pq11",
-        "principal:pq11",
-        "policy:pq11",
+        &session_id,
+        &tenant_id,
+        &principal_id,
+        &policy_id,
         3_600_000,
     )
     .await
     .expect("bind identity");
 
     let prompt = "Please use parallel tool-calls when possible, then summarize with compact context.";
-    let run = app.process_direct(session_id, prompt).await.expect("process direct");
+    let run = app.process_direct(&session_id, prompt).await.expect("process direct");
     assert!(!run.trim().is_empty());
 
     let snapshot = app
-        .session_named_snapshot(session_id, "d11-final")
+        .session_named_snapshot(&session_id, "d11-final")
         .await
         .expect("named snapshot");
     let snapshot_json: serde_json::Value = serde_json::from_str(&snapshot).expect("snapshot json");
     assert_eq!(snapshot_json["status"], "ok");
 
     let transcript = app
-        .session_export_transcript(session_id)
+        .session_export_transcript(&session_id)
         .await
         .expect("transcript");
     assert!(transcript.contains("Session Transcript"));
 
     let task = app
         .background_task_start_shell(
-            session_id,
+            &session_id,
             "d11-tail",
             "Write-Output 'd11-tail-ok'",
             0,
@@ -49,7 +64,7 @@ async fn d11_parallel_compact_snapshot_task_mcp_acceptance_e2e() {
 
     for _ in 0..30 {
         let status = app
-            .background_task_status(session_id, Some("d11-tail"))
+            .background_task_status(&session_id, Some("d11-tail"))
             .await
             .expect("task status");
         let status_json: serde_json::Value = serde_json::from_str(&status).expect("status json");
@@ -62,7 +77,7 @@ async fn d11_parallel_compact_snapshot_task_mcp_acceptance_e2e() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let tail = app
-        .background_task_logs(session_id, "d11-tail", 20)
+        .background_task_logs(&session_id, "d11-tail", 20)
         .await
         .expect("task logs");
     let tail_json: serde_json::Value = serde_json::from_str(&tail).expect("tail json");
@@ -77,8 +92,8 @@ async fn d11_parallel_compact_snapshot_task_mcp_acceptance_e2e() {
 
     let mcp_upsert = app
         .service_mediate(&autoloop::contracts::services::ServiceCall {
-            session_id: session_id.into(),
-            trace_id: "trace:pq11:mcp-upsert".into(),
+            session_id: session_id_wrapped.clone(),
+            trace_id: TraceId(format!("trace:pq11:mcp-upsert:{run_suffix}")),
             service_domain: autoloop::contracts::services::ServiceDomain::Tool,
             service_name: "mcp".into(),
             operation: "mcp_upsert_connection".into(),
@@ -86,7 +101,7 @@ async fn d11_parallel_compact_snapshot_task_mcp_acceptance_e2e() {
                 "server": "local-mcp",
                 "connected": true,
                 SERVICE_GATE_TOKEN_FIELD: build_service_gate_token(
-                    &session_id.into(),
+                    &session_id_wrapped,
                     &ServiceDomain::Tool,
                     1,
                 ),
@@ -101,14 +116,14 @@ async fn d11_parallel_compact_snapshot_task_mcp_acceptance_e2e() {
 
     let mcp_status = app
         .service_mediate(&autoloop::contracts::services::ServiceCall {
-            session_id: session_id.into(),
-            trace_id: "trace:pq11:mcp-status".into(),
+            session_id: session_id_wrapped.clone(),
+            trace_id: TraceId(format!("trace:pq11:mcp-status:{run_suffix}")),
             service_domain: autoloop::contracts::services::ServiceDomain::Tool,
             service_name: "mcp".into(),
             operation: "mcp_status".into(),
             input: serde_json::json!({
                 SERVICE_GATE_TOKEN_FIELD: build_service_gate_token(
-                    &session_id.into(),
+                    &session_id_wrapped,
                     &ServiceDomain::Tool,
                     2,
                 ),

@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::{BTreeSet, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
@@ -266,7 +266,7 @@ fn redact_messages(messages: &[ChatMessage]) -> (Vec<ChatMessage>, SessionRedact
         for rule in applied {
             rules.insert(rule);
         }
-        redacted.push(ChatMessage {
+        redacted.push(ChatMessage { tool_call_id: None, tool_calls: None,
             role: message.role.clone(),
             content,
         });

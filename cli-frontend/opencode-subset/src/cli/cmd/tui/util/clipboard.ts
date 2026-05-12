@@ -1,4 +1,4 @@
-import { platform, release } from "os"
+﻿import { platform, release } from "os"
 import { lazy } from "../../../../util/lazy.js"
 import { tmpdir } from "os"
 import path from "path"
@@ -48,7 +48,7 @@ export async function read(): Promise<Content | undefined> {
   const os = platform()
 
   if (os === "darwin") {
-    const tmpfile = path.join(tmpdir(), "opencode-clipboard.png")
+    const tmpfile = path.join(tmpdir(), "OntoLoop-clipboard.png")
     try {
       await Process.run(
         [

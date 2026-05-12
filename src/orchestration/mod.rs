@@ -605,11 +605,11 @@ impl OrchestrationKernel {
             })
             .collect::<Vec<_>>();
         let prompt = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: "You are the requirement agent. Run a bounded clarification loop, freeze the scope, and rewrite the request into an actionable brief with explicit acceptance criteria.".into(),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: serde_json::json!({
                     "request": request,
@@ -682,7 +682,7 @@ impl OrchestrationKernel {
         let verifier_signal_summary = summarize_verifier_signals(&routing.history_records);
         let ops_signal_summary = summarize_ops_signals(routing);
         let planner_prompt = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: format!(
                     "You are the swarm planner. Sequence the team, identify dependencies, and propose a bounded round-based plan.\n\n{}\n\n{}",
@@ -690,7 +690,7 @@ impl OrchestrationKernel {
                     task_pack_as_text(&task_pack)
                 ),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: serde_json::json!({
                     "goal": brief.clarified_goal,
@@ -736,7 +736,7 @@ impl OrchestrationKernel {
             });
 
         let critic_prompt = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: format!(
                     "You are the swarm critic. Find missing constraints, risky assumptions, and route weaknesses in the current plan.\n\n{}\n\n{}",
@@ -744,7 +744,7 @@ impl OrchestrationKernel {
                     task_pack_as_text(&task_pack)
                 ),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: serde_json::json!({
                     "goal": brief.clarified_goal,
@@ -787,7 +787,7 @@ impl OrchestrationKernel {
             .unwrap_or_else(|| "Critic requests explicit verifier checkpoints, capability reuse, and graph-grounded execution.".into());
 
         let rebuttal_prompt = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: format!(
                     "You are the swarm planner responding to a critic. Reconcile valid concerns, preserve necessary momentum, and update the round plan with minimal churn.\n\n{}\n\n{}",
@@ -795,7 +795,7 @@ impl OrchestrationKernel {
                     task_pack_as_text(&task_pack)
                 ),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: serde_json::json!({
                     "goal": brief.clarified_goal,
@@ -838,7 +838,7 @@ impl OrchestrationKernel {
             });
 
         let judge_prompt = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: format!(
                     "You are the swarm judge. Arbitrate between planner and critic, choose the final route, and freeze the execution order.\n\n{}\n\n{}",
@@ -846,7 +846,7 @@ impl OrchestrationKernel {
                     task_pack_as_text(&task_pack)
                 ),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: serde_json::json!({
                     "goal": brief.clarified_goal,
@@ -1102,14 +1102,14 @@ impl OrchestrationKernel {
     ) -> Result<String> {
         let overlay = self.adaptive_overlay(&brief.clarified_goal, routing);
         let prompt = vec![
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "system".into(),
                 content: format!(
                     "You are the CEO agent. Use graph density, historical execution results, pending events, and adaptive policy hints to decide the specialist team and execution order.\n\n{}",
                     overlay_as_text(&overlay)
                 ),
             },
-            ChatMessage {
+            ChatMessage { tool_call_id: None, tool_calls: None,
                 role: "user".into(),
                 content: serde_json::to_string(&(brief, routing))?,
             },
@@ -1765,14 +1765,14 @@ impl OrchestrationKernel {
                         guard_decision = "Delegated".into();
                         guard_reason = format!("peer delegation to {peer}");
                         let delegate_messages = [
-                            ChatMessage {
+                            ChatMessage { tool_call_id: None, tool_calls: None,
                                 role: "system".into(),
                                 content: format!(
                                     "You are peer delegate {}. Execute the delegated task with bounded reasoning and return actionable output.",
                                     peer
                                 ),
                             },
-                            ChatMessage {
+                            ChatMessage { tool_call_id: None, tool_calls: None,
                                 role: "user".into(),
                                 content: format!(
                                     "Goal: {}\nDelegated Task: {}",
@@ -1838,7 +1838,7 @@ impl OrchestrationKernel {
                     let overlay = self.adaptive_overlay(&task.objective, routing);
                     let task_pack = self.adaptive_task_pack(&task.objective, routing);
                     let provider_messages = [
-                        ChatMessage {
+                        ChatMessage { tool_call_id: None, tool_calls: None,
                             role: "system".into(),
                             content: format!(
                                 "You are {}.\n\n{}\n\n{}",
@@ -1847,7 +1847,7 @@ impl OrchestrationKernel {
                                 task_pack_as_text(&task_pack)
                             ),
                         },
-                        ChatMessage {
+                        ChatMessage { tool_call_id: None, tool_calls: None,
                             role: "user".into(),
                             content: format!(
                                 "Goal: {}\nTask: {}",

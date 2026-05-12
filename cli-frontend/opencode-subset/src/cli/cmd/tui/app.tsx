@@ -1,4 +1,4 @@
-import { render, TimeToFirstDraw, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
+﻿import { render, TimeToFirstDraw, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import * as Clipboard from "@tui/util/clipboard"
 import * as Selection from "@tui/util/selection"
 import { createCliRenderer, MouseButton, type CliRendererConfig } from "@opentui/core"
@@ -29,6 +29,7 @@ import { StartupLoading } from "@tui/component/startup-loading"
 import { SyncProvider, useSync } from "@tui/context/sync"
 import { LocalProvider, useLocal } from "@tui/context/local"
 import { DialogModel, useConnected } from "@tui/component/dialog-model"
+import { DialogMode } from "@tui/component/dialog-mode"
 import { DialogMcp } from "@tui/component/dialog-mcp"
 import { DialogStatus } from "@tui/component/dialog-status"
 import { DialogThemeList } from "@tui/component/dialog-theme-list"
@@ -301,19 +302,19 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     if (!terminalTitleEnabled() || Flag.OPENCODE_DISABLE_TERMINAL_TITLE) return
 
     if (route.data.type === "home") {
-      renderer.setTerminalTitle("OpenCode")
+      renderer.setTerminalTitle(`OntoLoop [${local.mode.current()}]`)
       return
     }
 
     if (route.data.type === "session") {
       const session = sync.session.get(route.data.sessionID)
       if (!session || SessionApi.isDefaultTitle(session.title)) {
-        renderer.setTerminalTitle("OpenCode")
+        renderer.setTerminalTitle(`OntoLoop [${local.mode.current()}]`)
         return
       }
 
       const title = session.title.length > 40 ? session.title.slice(0, 37) + "..." : session.title
-      renderer.setTerminalTitle(`OC | ${title}`)
+      renderer.setTerminalTitle(`OL [${local.mode.current()}] | ${title}`)
       return
     }
 
@@ -325,6 +326,11 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
   const args = useArgs()
   onMount(() => {
     batch(() => {
+      if (args.mode) {
+        const modes = local.mode.list()
+        const match = modes.find((m) => m.toLowerCase() === args.mode?.toLowerCase())
+        if (match) local.mode.set(match)
+      }
       if (args.agent) local.agent.set(args.agent)
       if (args.model) {
         const { providerID, modelID } = Provider.parseModel(args.model)
@@ -537,6 +543,39 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       },
     },
     {
+      title: "Switch mode",
+      value: "mode.list",
+      keybind: "mode_list",
+      suggested: true,
+      category: "Agent",
+      slash: {
+        name: "mode",
+      },
+      onSelect: () => {
+        dialog.replace(() => <DialogMode />)
+      },
+    },
+    {
+      title: "Mode cycle",
+      value: "mode.cycle",
+      keybind: "mode_cycle",
+      category: "Agent",
+      hidden: true,
+      onSelect: () => {
+        local.mode.cycle(1)
+      },
+    },
+    {
+      title: "Mode cycle reverse",
+      value: "mode.cycle_reverse",
+      keybind: "mode_cycle_reverse",
+      category: "Agent",
+      hidden: true,
+      onSelect: () => {
+        local.mode.cycle(-1)
+      },
+    },
+    {
       title: "Agent cycle reverse",
       value: "agent.cycle.reverse",
       keybind: "agent_cycle_reverse",
@@ -578,7 +617,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     {
       title: "View status",
       keybind: "status_view",
-      value: "opencode.status",
+      value: "ontoloop.status",
       slash: {
         name: "status",
       },
@@ -633,7 +672,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
       title: "Open docs",
       value: "docs.open",
       onSelect: () => {
-        open("https://opencode.ai/docs").catch(() => {})
+        open("https://ontoloop.ai/docs").catch(() => {})
         dialog.clear()
       },
       category: "System",
@@ -816,7 +855,7 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     await DialogAlert.show(
       dialog,
       "Update Complete",
-      `Successfully updated to OpenCode v${result.data.version}. Please restart the application.`,
+      `Successfully updated to OntoLoop v${result.data.version}. Please restart the application.`,
     )
 
     void exit()

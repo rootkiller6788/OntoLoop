@@ -1,4 +1,4 @@
-import { createMemo, createSignal, Show } from "solid-js"
+﻿import { createMemo, createSignal, Show } from "solid-js"
 import { useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { useTheme } from "@tui/context/theme"

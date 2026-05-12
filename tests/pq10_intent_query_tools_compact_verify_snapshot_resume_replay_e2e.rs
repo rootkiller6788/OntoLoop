@@ -2,7 +2,7 @@ use autoloop::{
     AutoLoopApp, config::AppConfig, observability::event_stream::list_replay_snapshots,
     observability::query_plane::persist_unified_query_view,
 };
-use autoloop_state_adapter::PermissionAction;
+use autoloop_state_adapter::{BudgetAccount, PermissionAction};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn warmup_query_payload(turn: usize) -> String {
@@ -29,7 +29,16 @@ fn has_compaction_boundary(records: &[autoloop_state_adapter::KnowledgeRecord]) 
 
 #[tokio::test]
 async fn pq10_full_chain_query_tools_compact_verify_snapshot_resume_replay() {
-    let app = AutoLoopApp::new(AppConfig::default());
+    let mut config = AppConfig::default();
+    config.storage.backend = autoloop::config::StorageBackend::Postgres;
+    config.storage.postgres.enabled = true;
+    config.storage.postgres.uri = std::env::var("ONTOLOOP_TEST_POSTGRES_URI")
+        .unwrap_or_else(|_| "postgres://postgres:123456@localhost:5432/postgres".to_string());
+    config.storage.shadow_read_preference = "postgres".to_string();
+    config.runtime.budget_enforced = false;
+    config.runtime.default_budget_micros = 50_000_000;
+    config.runtime.quota_window_budget_micros = 50_000_000;
+    let app = AutoLoopApp::new(config);
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock should be after unix epoch")
@@ -57,6 +66,20 @@ async fn pq10_full_chain_query_tools_compact_verify_snapshot_resume_replay() {
     )
     .await
     .expect("seed identity");
+    app.state_store()
+        .upsert_budget_account(BudgetAccount {
+            account_id: "principal:pq10".to_string(),
+            tenant_id: "tenant:pq10".to_string(),
+            principal_id: "principal:pq10".to_string(),
+            policy_id: "policy:default".to_string(),
+            total_budget_micros: 50_000_000,
+            reserved_micros: 0,
+            spent_micros: 0,
+            blocked_count: 0,
+            updated_at_ms: autoloop::orchestration::current_time_ms(),
+        })
+        .await
+        .expect("seed high budget account");
 
     let intent_response = app
         .process_requirement_swarm(
@@ -70,10 +93,18 @@ async fn pq10_full_chain_query_tools_compact_verify_snapshot_resume_replay() {
         "intent response should not be empty"
     );
 
-    let execution_feedback = app.state_store()
-        .list_knowledge_by_prefix(&format!("conversation:{session}:execution-feedback:"))
-        .await
-        .expect("list execution feedback");
+    let mut execution_feedback = Vec::new();
+    for _ in 0..40 {
+        execution_feedback = app
+            .state_store()
+            .list_knowledge_by_prefix(&format!("conversation:{session}:execution-feedback:"))
+            .await
+            .expect("list execution feedback");
+        if !execution_feedback.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     assert!(
         !execution_feedback.is_empty(),
         "tools stage should persist execution feedback artifacts"

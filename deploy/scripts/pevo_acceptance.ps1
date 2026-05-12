@@ -2,13 +2,19 @@
   [string]$ManifestPath = ".\Cargo.toml",
   [string]$ProdConfigPath = "deploy/config/autoloop.prod.toml",
   [string]$SessionPrefix = "pevo-rollout",
-  [string]$ArtifactPath = "D:\AutoLoop\autoloop-app\deploy\runtime\pevo-shadow-bill-replica.html"
+  [string]$ArtifactPath = "D:\AutoLoop\autoloop-app\deploy\runtime\pevo-shadow-bill-replica.html",
+  [int]$StepRetryCount = 1
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Push-Location $repoRoot
 $backupPath = ""
+$previousCargoTargetDir = if (Test-Path Env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { $null }
+$previousLocalPgUri = if (Test-Path Env:AUTOLOOP_LOCAL_POSTGRES_URI) { $env:AUTOLOOP_LOCAL_POSTGRES_URI } else { $null }
+$scriptSucceeded = $false
+$runtimeDir = ""
+$targetDir = ""
 
 try {
   $env:RUST_MIN_STACK = "33554432"
@@ -22,6 +28,20 @@ try {
   $logPath = Join-Path $runtimeDir ("pevo-acceptance-" + $stamp + ".log")
   $jsonPath = Join-Path $runtimeDir ("pevo-acceptance-" + $stamp + ".json")
   $backupPath = Join-Path $runtimeDir ("pevo-autoloop.prod.backup-" + $stamp + ".toml")
+  $targetDir = Join-Path $runtimeDir ("target-pevo-" + $stamp)
+  New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+  $env:CARGO_TARGET_DIR = $targetDir
+  $localBaseUri = [Environment]::GetEnvironmentVariable("AUTOLOOP_LOCAL_POSTGRES_URI")
+  if ([string]::IsNullOrWhiteSpace($localBaseUri)) {
+    $localBaseUri = "postgres://postgres:123456@localhost:5432/ontoloop_prod"
+  }
+  $schema = ("ol_pevo_" + $stamp.Replace("-", "_"))
+  $env:AUTOLOOP_LOCAL_POSTGRES_URI = $localBaseUri + "?options=-csearch_path%3D" + $schema + "%2Cpublic"
+  $psql = Get-Command psql -ErrorAction SilentlyContinue
+  if ($null -ne $psql) {
+    $createSql = "CREATE SCHEMA IF NOT EXISTS " + $schema + ";"
+    & $psql.Source -d $localBaseUri -v ON_ERROR_STOP=1 -c $createSql | Out-Null
+  }
 
   Copy-Item -Path $ProdConfigPath -Destination $backupPath -Force
 
@@ -32,28 +52,40 @@ try {
       [string[]]$Argv
     )
 
-    $display = "$Exe $($Argv -join ' ')"
-    Add-Content -Path $logPath -Value ("`n==== RUN: [" + $Name + "] " + $display + " ====")
+    $maxAttempts = [Math]::Max(1, $StepRetryCount + 1)
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+      $display = "$Exe $($Argv -join ' ')"
+      Add-Content -Path $logPath -Value ("`n==== RUN: [" + $Name + "] attempt " + $attempt + "/" + $maxAttempts + " " + $display + " ====")
 
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $output = & $Exe @Argv 2>&1
-    $exitCode = $LASTEXITCODE
-    $ErrorActionPreference = $prev
+      $prev = $ErrorActionPreference
+      $ErrorActionPreference = "Continue"
+      $output = & $Exe @Argv 2>&1
+      $exitCode = $LASTEXITCODE
+      $ErrorActionPreference = $prev
 
-    if ($null -ne $output) {
-      $output | Out-File -FilePath $logPath -Append -Encoding utf8
-    }
+      $outputText = ""
+      if ($null -ne $output) {
+        $output | Out-File -FilePath $logPath -Append -Encoding utf8
+        $outputText = ($output | Out-String)
+      }
 
-    if ($exitCode -ne 0) {
+      if ($exitCode -eq 0) {
+        return [pscustomobject]@{
+          name = $Name
+          command = $display
+          passed = $true
+          exit_code = 0
+          attempts = $attempt
+        }
+      }
+
+      $isTransientLock = ($outputText -match "os error 5") -or ($outputText -match "The process cannot access the file")
+      if ($attempt -lt $maxAttempts -and $isTransientLock) {
+        Start-Sleep -Milliseconds (500 * $attempt)
+        continue
+      }
+
       throw "Command failed ($exitCode): [$Name] $display"
-    }
-
-    return [pscustomobject]@{
-      name = $Name
-      command = $display
-      passed = $true
-      exit_code = 0
     }
   }
 
@@ -261,12 +293,61 @@ Also run this verifier contract for harness hard gate:
   }
 
   $summary | ConvertTo-Json -Depth 8 | Out-File -FilePath $jsonPath -Encoding utf8
+  $scriptSucceeded = $true
   Write-Output ("PEVO_ACCEPTANCE_OK log=" + $logPath)
   Write-Output ("PEVO_ACCEPTANCE_JSON=" + $jsonPath)
 }
 finally {
+  if ($null -eq $previousCargoTargetDir) {
+    Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+  } else {
+    $env:CARGO_TARGET_DIR = $previousCargoTargetDir
+  }
+  if ($null -eq $previousLocalPgUri) {
+    Remove-Item Env:AUTOLOOP_LOCAL_POSTGRES_URI -ErrorAction SilentlyContinue
+  } else {
+    $env:AUTOLOOP_LOCAL_POSTGRES_URI = $previousLocalPgUri
+  }
   if ($backupPath -and (Test-Path $backupPath)) {
     Copy-Item -Path $backupPath -Destination $ProdConfigPath -Force
+  }
+  if (-not [string]::IsNullOrWhiteSpace($runtimeDir) -and (Test-Path $runtimeDir)) {
+    $cutoff = (Get-Date).AddDays(-7)
+    if ($scriptSucceeded) {
+      if (-not [string]::IsNullOrWhiteSpace($targetDir) -and (Test-Path $targetDir)) {
+        Remove-Item -LiteralPath $targetDir -Recurse -Force -ErrorAction SilentlyContinue
+      }
+      Get-ChildItem -Path $runtimeDir -File -Filter "pevo-acceptance-*.log" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cutoff } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    } else {
+      $diagFiles = @(
+        Get-ChildItem -Path $runtimeDir -File -Filter "pevo-acceptance-*.json" -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $runtimeDir -File -Filter "pevo-acceptance-*.log" -ErrorAction SilentlyContinue
+      ) | Sort-Object LastWriteTime -Descending
+      $keepDiag = $diagFiles | Select-Object -First 1
+      foreach ($f in $diagFiles) {
+        if ($null -ne $keepDiag -and $f.FullName -eq $keepDiag.FullName) {
+          if ($f.LastWriteTime -lt $cutoff) {
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+          }
+          continue
+        }
+        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+      }
+      $targets = Get-ChildItem -Path $runtimeDir -Directory -Filter "target-pevo-*" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending
+      $keepTarget = $targets | Select-Object -First 1
+      foreach ($d in $targets) {
+        if ($null -ne $keepTarget -and $d.FullName -eq $keepTarget.FullName) {
+          if ($d.LastWriteTime -lt $cutoff) {
+            Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          continue
+        }
+        Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+      }
+    }
   }
   Pop-Location
 }

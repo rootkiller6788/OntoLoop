@@ -78,8 +78,23 @@ try {
 
   $doctor = Invoke-SystemJsonStep -Name "ops-config-doctor" -SessionId ($SessionPrefix + "-doctor") -SystemArgs @("config", "doctor", "--profile", "production")
   $results += $doctor.step
-  if ($doctor.json.status -eq "fail") {
-    throw "config doctor failed"
+  if ($doctor.json.status -ne "pass") {
+    throw "config doctor hard gate failed: status=$($doctor.json.status)"
+  }
+  $requiredIds = @(
+    "profile.alignment",
+    "runtime.gate_mode",
+    "runtime.rollback_window",
+    "storage.backend_consistency"
+  )
+  foreach ($id in $requiredIds) {
+    $check = $doctor.json.checks | Where-Object { $_.id -eq $id } | Select-Object -First 1
+    if ($null -eq $check) {
+      throw "config doctor hard gate missing required check: $id"
+    }
+    if (-not $check.passed) {
+      throw "config doctor hard gate check failed: $id => $($check.message)"
+    }
   }
 
   $health = Invoke-SystemJsonStep -Name "ops-health-check" -SessionId ($SessionPrefix + "-health") -SystemArgs @("health")

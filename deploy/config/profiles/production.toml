@@ -1,0 +1,22 @@
+# OntoLoop production profile template
+#
+# Usage:
+#   copy this file as deploy/config/autoloop.prod.toml or merge selectively.
+
+[runtime]
+gate_mode = "canary"
+gate_enforce_ratio = 0.3
+permission_mode = "prompt"
+policy_mode = "enforced"
+
+[observability.alert_thresholds]
+p95_latency_ms = 2500.0
+error_rate = 0.05
+mttr_ms = 120000.0
+open_circuit_count = 2
+
+[observability.signal_pipeline]
+mode = "enforced"
+batch_size = 64
+max_retries = 5
+retry_backoff_ms = 200

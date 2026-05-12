@@ -1,4 +1,4 @@
-import { Player } from "cli-sound"
+﻿import { Player } from "cli-sound"
 import { mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
@@ -12,7 +12,7 @@ import charge from "../asset/charge.wav" with { type: "file" }
 const FILE = [pulseA, pulseB, pulseC]
 
 const HUM = charge
-const DIR = join(tmpdir(), "opencode-sfx")
+const DIR = join(tmpdir(), "OntoLoop-sfx")
 
 const LIST = [
   "ffplay",

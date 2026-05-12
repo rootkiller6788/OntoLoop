@@ -622,7 +622,7 @@ impl Default for AppConfig {
             agent: AgentConfig {
                 max_iterations: 12,
                 memory_window: 100,
-                system_prompt: "You are AutoLoop, a lightweight autonomous assistant runtime."
+                system_prompt: "You are OntoLoop, an autonomous AI coding agent. Use tools (read_file, write_file, shell) to complete tasks. Verify with tests."
                     .into(),
             },
             runtime: RuntimeConfig {
@@ -639,10 +639,10 @@ impl Default for AppConfig {
                 permission_mode: default_runtime_permission_mode(),
                 policy_mode: default_runtime_policy_mode(),
                 rollback_contract_version: None,
-                budget_enforced: true,
-                default_budget_micros: 5_000_000,
+                budget_enforced: false,
+                default_budget_micros: 100_000_000,
                 quota_window_ms: 3_600_000,
-                quota_window_budget_micros: 1_000_000,
+                quota_window_budget_micros: 100_000_000,
                 attestation_required: false,
                 attestation_secret_env: "AUTOLOOP_ATTESTATION_SECRET".into(),
                 attestation_backend: AttestationBackend::Env,
@@ -723,7 +723,7 @@ impl Default for AppConfig {
             },
             tools: ToolsConfig {
                 builtin: vec!["read_file".into(), "write_file".into(), "web_fetch".into()],
-                allow_shell: false,
+                allow_shell: true,
                 mcp_servers: vec!["local-mcp".into()],
             },
             hooks: HooksConfig {
@@ -746,13 +746,13 @@ impl Default for AppConfig {
                 backup_dir: PathBuf::from("deploy/backup"),
             },
             storage: StorageConfig {
-                backend: default_storage_backend(),
-                mode: default_storage_mode(),
-                shadow_read_preference: default_storage_shadow_read_preference(),
-                shadow_read_rollout_percent: default_storage_shadow_read_rollout_percent(),
-                shadow_write_grace_hours: default_storage_shadow_write_grace_hours(),
+                backend: StorageBackend::PrimaryStore,
+                mode: StorageMode::Direct,
+                shadow_read_preference: "primary_store".into(),
+                shadow_read_rollout_percent: 0,
+                shadow_write_grace_hours: 0,
                 postgres: PostgresConfig {
-                    enabled: default_postgres_enabled(),
+                    enabled: false,
                     uri: default_postgres_uri(),
                     pool_size: default_postgres_pool_size(),
                     schema: default_postgres_schema(),

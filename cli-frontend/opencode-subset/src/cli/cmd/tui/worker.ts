@@ -1,4 +1,4 @@
-import { Installation } from "@/installation"
+﻿import { Installation } from "@/installation"
 import { Server } from "@/server/server"
 import { Log } from "@/util"
 import { Instance } from "@/project/instance"
@@ -11,7 +11,7 @@ import { Flag } from "@/flag/flag"
 import { writeHeapSnapshot } from "node:v8"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
-import { ensureProcessMetadata } from "@/util/opencode-process"
+import { ensureProcessMetadata } from "@/util/OntoLoop-process"
 
 ensureProcessMetadata("worker")
 
@@ -99,6 +99,6 @@ Rpc.listen(rpc)
 function getAuthorizationHeader(): string | undefined {
   const password = Flag.OPENCODE_SERVER_PASSWORD
   if (!password) return undefined
-  const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
+  const username = Flag.OPENCODE_SERVER_USERNAME ?? "OntoLoop"
   return `Basic ${btoa(`${username}:${password}`)}`
 }
