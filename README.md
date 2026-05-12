@@ -1,4 +1,4 @@
-﻿# OntoLoop Sovereign OS (Engineering Runtime)
+﻿﻿# OntoLoop Sovereign OS (Engineering Runtime)
 OntoLoop is an AI sovereign runtime oriented to **Governance + Execution + Learning + Replay**.
 The current version has entered a production-ready engineering phase, featuring closed-loop capabilities for governance, execution, trust verification and continuous learning.
 
