@@ -1,15 +1,16 @@
 ﻿# OntoLoop Sovereign OS (Engineering Runtime)
+OntoLoop is an AI sovereign runtime oriented to **Governance + Execution + Learning + Replay**.
+The current version has entered a production-ready engineering phase, featuring closed-loop capabilities for governance, execution, trust verification and continuous learning.
 
-OntoLoop 鏄竴涓潰鍚戔€滄不鐞?+ 鎵ц + 瀛︿範 + 鍥炴斁鈥濈殑 AI 涓绘潈杩愯鏃躲€傚綋鍓嶇増鏈凡缁忚繘鍏ュ彲楠屾敹宸ョ▼鎬侊紝鍏峰娌荤悊闂幆銆佹墽琛岄棴鐜€佽瘉鎹棴鐜拰瀛︿範闂幆銆?
-## 鎴戜滑鐜板湪鏈夊摢浜涜兘鍔?
-- 娌荤悊涓婚摼锛歅olicy / Tenant / Approval / Risk / Budget / Rollout
-- 鎵ц涓婚摼锛欳apability Admission -> Trust Admission Kernel -> Runtime Guard -> Layered Tool Stack -> Execution Fabric
-- 璇佹嵁涓婚摼锛欵vidence Tagger -> Flow State Engine -> Trust Evidence Ledger锛坔ash-chain锛?- 瀛︿範涓婚摼锛歀earning Proposal -> Promotion Gate -> Private Memory / Org Knowledge
-- 鍙娴嬩富閾撅細Telemetry Collector -> Policy Signal Aggregator -> Query/Replay/Explanation Plane
-- TrustKernel锛圢oumenonCore锛夎瀺鍚堬細韬唤璇佹槑銆乤ttestation銆佷緵搴旈摼楠岃瘉銆佸己鍒堕棬绂併€佸彲鍥炴斁瀹¤
+## Core Capability Modules
+- Governance Pipeline：Policy / Tenant / Approval / Risk / Budget / Rollout
+- Execution Pipeline：Capability Admission → Trust Admission Kernel → Runtime Guard → Layered Tool Stack → Execution Fabric
+- Trust Pipeline：Evidence Tagger → Flow State Engine → Trust Evidence Ledger (Hash-chain)
+- Learning Pipeline：Learning Proposal → Promotion Gate → Private Memory / Org Knowledge
+- Observability Pipeline：Telemetry Collector → Policy Signal Aggregator → Query/Replay/Explanation Plane
+- TrustKernel (NoumenonCore) Integration：Identity Authentication, Attestation, Supply Chain Validation, Strong Isolation, Replayable Audit
 
-## 鏋舵瀯涓婚摼锛堢畝鐗堬級
-
+## Architecture Pipeline (Compact Version)
 ```text
 [User/Trigger]
     -> [Structured Transport + Session Bridge]
@@ -33,27 +34,24 @@ OntoLoop 鏄竴涓潰鍚戔€滄不鐞?+ 鎵ц + 瀛︿範 + 鍥炴斁
     -> [Next Iteration]
 ```
 
-## 蹇€熷紑濮?
-### 1) 鐜瑕佹眰
-
+## Quick Start
+### 1) Environment Requirements
 - Rust toolchain
-- 鍙€夛細StateStore CLI
-- 鍙€夛細Docker / Docker Compose
+- Optional: StateStore CLI
+- Optional: Docker / Docker Compose
 
-### 2) 鏈湴杩愯
-
+### 2) Local Execution
 ```powershell
 cargo run --manifest-path .\Cargo.toml -- --message "Build a governed autonomous loop" --swarm
 ```
 
-### 3) 鏈湴妫€鏌?
+### 3) Local Validation
 ```powershell
 cargo check --workspace --manifest-path .\Cargo.toml
 cargo test --workspace --manifest-path .\Cargo.toml
 ```
 
-## 甯哥敤鍛戒护
-
+## Common CLI Commands
 ```powershell
 cargo run --manifest-path .\Cargo.toml -- system health
 cargo run --manifest-path .\Cargo.toml -- --session demo system replay-report
@@ -62,69 +60,67 @@ cargo run --manifest-path .\Cargo.toml -- --session demo focus board
 cargo run --manifest-path .\Cargo.toml -- --session demo org context
 cargo run --manifest-path .\Cargo.toml -- bridge status
 cargo run --manifest-path .\Cargo.toml -- knowledge batch-export --anchor-list .\deploy\anchors.txt --type graph
-cargo run --manifest-path .\Cargo.toml -- trigger webhook --anchor-id cli:focus --topic order.created --payload "{""order_id"": ""A-1001""}" --run-now
+cargo run --manifest-path .\Cargo.toml -- trigger webhook --anchor-id cli:focus --topic order.created --payload "{\"order_id\": \"A-1001\"}" --run-now
 cargo run --manifest-path .\Cargo.toml -- --session cli:focus system export
 cargo run --manifest-path .\Cargo.toml -- --session cli:focus frontend status
 cargo run --manifest-path .\Cargo.toml -- --session cli:focus frontend events --format pretty --limit 20
 ```
 
-CLI frontend is additive. Existing app frontend directories such as `dashboard-ui/` are preserved for later application surfaces.
+The CLI frontend is designed additively. Existing frontend directories such as `dashboard-ui/` are fully reserved for subsequent application interface expansion.
 
-## 楠屾敹鑴氭湰
-
+## Acceptance Scripts
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\deploy\scripts\p95_acceptance.ps1
 powershell -ExecutionPolicy Bypass -File .\deploy\scripts\pq9_acceptance.ps1
 powershell -ExecutionPolicy Bypass -File .\deploy\scripts\week6_acceptance.ps1
 powershell -ExecutionPolicy Bypass -File .\deploy\scripts\trigger_supermemory_acceptance.ps1
 ```
-Linux: `bash ./deploy/scripts/week6_acceptance.sh`
 
-杈撳嚭璇佹嵁锛?
+Linux Environment:
+```bash
+bash ./deploy/scripts/week6_acceptance.sh
+```
+
+Output Artifacts:
 - `deploy/runtime/p95-acceptance.log`
 - `deploy/runtime/p95-acceptance.json`
 
-## 鐩綍缁撴瀯
+## Directory Structure
+- `src/`: Core runtime & governance logic
+- `src/query_engine/`: Turn state / Continuation / Context Compactor / Loop Scheduler
+- `src/runtime/`: Runtime Guard / Admission Control / Execution / Evidence Collection / Flow Engine
+- `src/security/`: Policy Control / Permission Mode / Capability Admission System
+- `src/session/`: Checkpoint / Resume / Runtime Session Management
+- `src/memory/`: Private Memory + SuperMemory Pipeline
+- `src/observability/`: Telemetry Collector / Query Plane / Replay & Trace Explanation
+- `src/transport/`: Structured Transport / Cross-environment Session Bridge
+- `src/plugins/`: Plugin Lifecycle Management
+- `src/skills/`: Skill Registry / Capability Build Pipeline
+- `src/services/`: Service Mediation & Orchestration Spine
+- `tests/`: E2E Testing & Regression Test Suite
+- `deploy/scripts/`: Automated Acceptance & Operational Scripts
+- `docs/`: Protocol Specifications / Architecture Design / Acceptance Standards
 
-- `src/`锛氭牳蹇冭繍琛屾椂涓庢不鐞嗛€昏緫
-- `src/query_engine/`锛歵urn state / continuation / compactor / loop
-- `src/runtime/`锛歡uard / admission / execution / evidence / flow
-- `src/security/`锛歱olicy / permission mode / capability admission
-- `src/session/`锛歝heckpoint / resume / runtime
-- `src/memory/`锛歮emory + supermemory pipeline
-- `src/observability/`锛歝ollector / query plane / replay explanation
-- `src/transport/`锛歴tructured transport + bridge
-- `src/plugins/`锛歱lugin lifecycle
-- `src/skills/`锛歴kill registry / builder pipeline
-- `src/services/`锛歴ervice mediation spine
-- `tests/`锛欵2E + 鍥炲綊娴嬭瘯
-- `deploy/scripts/`锛氶獙鏀朵笌婕旂粌鑴氭湰
-- `docs/`锛氬崗璁€佹灦鏋勩€侀獙鏀舵枃妗?
-## 褰撳墠鐘舵€?
-褰撳墠鐗堟湰澶勪簬鈥滀富閾惧彲璺戙€佽瘉鎹彲杩芥函銆佸洖鏀惧彲瑙ｉ噴鈥濈殑楂樺彲鐢ㄥ伐绋嬮樁娈碉紱寤鸿鎸佺画鎸?`deploy/scripts/` 鍥炲綊鍚庡啀閫愭鏀惧ぇ鐢熶骇娴侀噺銆?
+## Current Status
+The current release is in a high-maturity engineering stage: **core pipeline runnable, data traceable, audit log explainable**.
+It is recommended to complete full regression verification via `deploy/scripts/` first, then gradually scale production workloads.
 
-
-CLI 瑙勮寖鏂囨。锛?
+CLI Specification Document:
 - docs/CLI_SPECIFICATION.md
 
 ## Signal Whitebox Commands (D9/D10/D11)
-
-The signal pipeline is now exposed through whitebox CLI commands:
-
+The internal signal pipeline is exposed via white-box CLI commands for debugging and inspection:
 ```powershell
 cargo run --manifest-path .\Cargo.toml -- system signal status
 cargo run --manifest-path .\Cargo.toml -- system signal explain --trace-id <trace-id>
 cargo run --manifest-path .\Cargo.toml -- system signal drain
 ```
 
-Implementation policy:
-- Business-side signal writes must go through `SignalFacade`.
-- Direct bypass writes are blocked by static scan tests.
-- Signal acceptance is included in `deploy/scripts/week6_acceptance.ps1` and `deploy/scripts/week6_acceptance.sh`.
+Implementation Governance Rules:
+- All business-side signal writes must pass through the unified `SignalFacade` layer.
+- Direct bypass write operations are blocked by static scan tests.
+- Signal pipeline acceptance is integrated into `week6_acceptance` full regression scripts.
 
 ## Rule Reference Policy
-
-`rule/` 下的第三方材料如需引入，仅用于设计对照与第一性抽取，不进入构建与运行时依赖。
-
-
-
+Third-party reference materials under the `rule/` directory are only used for architecture benchmarking and theoretical abstraction.
+These files are excluded from build dependencies and runtime execution.
